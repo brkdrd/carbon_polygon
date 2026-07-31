@@ -1,0 +1,21 @@
+{
+  "id": "brkdrd/sonata-segr-gt",
+  "title": "Sonata+Segr + ground truth",
+  "code_file": "sonata-segr-gt.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "samsuperman12/my-private-lidar-dataset",
+    "brkdrd/carbon-polygon-stem-map"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-images/python@sha256:dafd4ce5668bbf1ad422e4c109e0f18c9623c3a7c7f48b0235f13142755c40b9",
+  "machine_shape": "NvidiaTeslaT4"
+}
