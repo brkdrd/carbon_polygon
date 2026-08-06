@@ -111,12 +111,28 @@ built exactly once — so the four experiments provably share one input.
 
 ## Notes & caveats
 
-- **"Trees + bushes."** WHU-STree (the head's training source) labels street-tree
-  *instances* only — it has no separate shrub class, so "bush" can't be
-  *supervised* from it. The head is trained on woody-vegetation morphology from
-  Sonata's self-supervised features, which transfers to bushes at inference
-  (they're geometrically vegetation-like). That's the honest limitation; the
-  positive class is best read as "woody vegetation."
+- **"Trees + bushes" — combined training sources.** The vegetation head is
+  trained on the union of two labelled sources (`TRAIN_SOURCES=whu,semantic3d`):
+  - **WHU-STree** (MLS street trees) — positive = tree instances. Matches the
+    campus sensor domain but has no shrub class.
+  - **Semantic3D** (TLS) — positive = **high vegetation ∪ low vegetation**
+    (labels 3 & 4). Its terrestrial geometry is close to the MLS target, and its
+    low-vegetation class supplies the shrub/bush supervision WHU-STree lacks.
+
+  Both are mapped to the same binary target and **density-normalized into one
+  regime** (the WHU density) before feature extraction; that target density is
+  saved in the head checkpoint and reused verbatim to match the campus cloud, so
+  training and inference share one density regime. RGB is dropped from Semantic3D
+  to keep the colour channel neutral on both sources (matching the campus MLS,
+  which has none). Use `TRAIN_SOURCES=whu` to fall back to trees-only.
+
+  **Getting Semantic3D:** it is not auto-bundled. Either mount pre-downloaded
+  files into `data/raw/semantic3d/` (the `*.7z` point archives + the shared
+  `sem8_labels_training.7z`, or already-extracted `.txt` + `.labels`), or set
+  `SEM3D_DOWNLOAD=1` to fetch the configured stations at runtime. The
+  semantic3d.net TLS cert is mismatched, so downloads use http with unverified
+  SSL — mounting the files yourself is more reliable. If Semantic3D is
+  unavailable and download is off, the head trains on WHU alone with a warning.
 - **Instance vs semantic.** Sonata produces a *semantic* mask (vegetation vs
   background); TreeLearn and SegmentAnyTree produce *instance* segmentation (one
   colour per tree). The result images reflect that: mask images are two-tone,

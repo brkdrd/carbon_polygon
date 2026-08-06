@@ -23,17 +23,17 @@ from common import config as C
 from common import geo
 from common import viz
 import sonata_lib as SL
-from train_head import LinearHead, build_tiles  # reuse head + WHU density ref
+from train_head import LinearHead, reference_density
 
 
-def density_match(model, transform, tile_xyz, tile_int):
-    """Match campus density to WHU so the encoder sees a familiar sampling."""
-    tiles_tr, _ = build_tiles()
-    whu_d = np.median([geo.occupied_density(t[0]) for t in tiles_tr])
+def density_match(tile_xyz, tile_int, target_density):
+    """Match campus density to the head's training regime so the encoder sees a
+    familiar sampling. `target_density` is the common density the head was
+    trained at (carried in the checkpoint) — see train_head.build_tiles."""
     camp_d = geo.occupied_density(tile_xyz)
-    grid = C.GRID_SIZE * np.sqrt(max(camp_d, 1) / max(whu_d, 1))
-    print(f"[sonata] density WHU {whu_d:.0f} vs campus {camp_d:.0f} pts/m^2 "
-          f"-> grid {grid:.3f} m")
+    grid = C.GRID_SIZE * np.sqrt(max(camp_d, 1) / max(target_density, 1))
+    print(f"[sonata] density target {target_density:.0f} vs campus {camp_d:.0f} "
+          f"pts/m^2 -> grid {grid:.3f} m")
     xyz_m, (int_m,) = geo.grid_subsample(tile_xyz, [tile_int], grid)
     print(f"[sonata] {len(tile_xyz):,} -> {len(xyz_m):,} pts "
           f"(matched {geo.occupied_density(xyz_m):.0f} pts/m^2)")
@@ -68,9 +68,13 @@ def main():
     head = LinearHead(ckpt["feat_dim"]).cuda()
     head.load_state_dict(ckpt["state_dict"])
     head.eval()
-    print(f"[sonata] head loaded (val veg IoU {ckpt.get('iou', float('nan')):.4f})")
+    print(f"[sonata] head loaded (val veg IoU {ckpt.get('iou', float('nan')):.4f} "
+          f"| sources {ckpt.get('sources', ['whu'])})")
 
-    tile_xyz, tile_int = density_match(model, transform, tile_xyz, tile_int)
+    # Match the campus to the exact density the head was trained at. Newer heads
+    # carry it in the checkpoint; older ones fall back to the WHU reference.
+    target_density = ckpt.get("target_density") or reference_density()
+    tile_xyz, tile_int = density_match(tile_xyz, tile_int, target_density)
 
     # inference with OOM-safe recursive splitting (notebook infer_box logic)
     lsum = np.zeros((len(tile_xyz), 2), np.float32)

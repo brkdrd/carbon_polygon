@@ -31,7 +31,7 @@ RUN set -eux; read TORCH_V CU < /tmp/tv; \
     pip install -q -U "gdown>=6.1"; \
     pip install -q huggingface_hub timm addict "laspy[lazrs]" plyfile; \
     pip install -q open3d "numpy<2"; \
-    pip install -q matplotlib tqdm; \
+    pip install -q matplotlib tqdm pandas py7zr; \
     pip install -q "git+https://github.com/facebookresearch/sonata.git"
 
 # Some Kaggle images ship a stray setup.py/.gitignore in dist-packages that makes

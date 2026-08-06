@@ -58,10 +58,36 @@ IMG_EXP4 = RESULTS / "exp4_segmentanytree_on_sonata_mask.png"
 
 # ---- Sonata vegetation head ------------------------------------------------
 SONATA_HEAD = MODELS / "sonata_vegetation_head.pth"
-# WHU-STree source used to train the head (same Drive folder as the notebook)
+
+# Which labelled sources train the head. Positive class = vegetation
+# (trees + shrubs/bushes). Both sources are mapped to the same binary target and
+# density-normalized into a common regime before feature extraction.
+#   whu        -> WHU-STree street-tree instances (positive = tree points)
+#   semantic3d -> Semantic3D high+low vegetation (positive = shrub AND tree)
+TRAIN_SOURCES = [s.strip() for s in
+                 os.environ.get("TRAIN_SOURCES", "whu,semantic3d").split(",") if s.strip()]
+
+# WHU-STree source (same Drive folder as the notebook)
 WHU_DRIVE_URL = os.environ.get(
     "WHU_DRIVE_URL",
     "https://drive.google.com/drive/folders/18braC_G3RAi5fn8TZNRe-Vt8q1bYRZqk",
 )
 WHU_CITY = os.environ.get("WHU_CITY", "whu-stree-nj")
 WHU_MAX_PLY = int(os.environ.get("WHU_MAX_PLY", "2"))
+
+# ---- Semantic3D (TLS; gives real shrub/low-vegetation supervision) ---------
+# Labels (.labels files): 0=unlabelled, 1=man-made terrain, 2=natural terrain,
+# 3=high vegetation, 4=low vegetation, 5=buildings, 6=hard scape,
+# 7=scanning artefacts, 8=cars.  Positive vegetation = {3, 4}.
+SEM3D_VEG_LABELS = (3, 4)
+SEM3D_DIR = Path(os.environ.get("SEM3D_DIR", str(RAW_DIR / "semantic3d")))
+# Point files x/y/z/intensity/r/g/b (.txt) + one label per line (.labels).
+# Default to a few smaller, vegetation-rich stations; sg27/sg28 are huge.
+SEM3D_STATIONS = [s.strip() for s in os.environ.get(
+    "SEM3D_STATIONS",
+    "bildstein_station1,neugasse_station1,domfountain_station1").split(",") if s.strip()]
+SEM3D_MAX_PTS = int(os.environ.get("SEM3D_MAX_PTS", "6000000"))   # cap per station
+SEM3D_KEEP_FRAC = float(os.environ.get("SEM3D_KEEP_FRAC", "0.05"))  # per-chunk keep
+SEM3D_MAX_TILES = int(os.environ.get("SEM3D_MAX_TILES", "16"))
+SEM3D_DOWNLOAD = os.environ.get("SEM3D_DOWNLOAD", "0") == "1"
+SEM3D_BASE_URL = os.environ.get("SEM3D_BASE_URL", "http://semantic3d.net/data")
