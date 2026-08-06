@@ -1,0 +1,4 @@
+numpy<2
+laspy[lazrs]>=2.5
+matplotlib>=3.7
+kaggle>=1.6

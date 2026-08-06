@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+
+# runtime volumes — keep the dirs, ignore their contents (large point clouds,
+# weights, and SAT staging folders). Result PNGs under results/ ARE tracked.
+data/raw/
+data/cache/
+data/chunk/
+data/models/
+data/treelearn/
+data/sat/
+!data/.gitkeep

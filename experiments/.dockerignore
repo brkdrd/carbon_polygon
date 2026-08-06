@@ -1,0 +1,6 @@
+# keep the (potentially large) runtime volumes out of the build context
+data/
+results/
+.env
+**/__pycache__/
+*.pyc

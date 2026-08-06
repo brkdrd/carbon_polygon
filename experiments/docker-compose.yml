@@ -1,0 +1,98 @@
+# Four-experiment tree-segmentation study. Every service shares ./data and
+# ./results (bind mounts), so the chunk built once by `prep` is the identical
+# input to all four experiments. Orchestrated in order by ../run_experiments.sh
+# (which calls `docker compose run` per stage); the depends_on conditions also
+# let you run `docker compose up` and have it self-order.
+#
+# GPU services need the NVIDIA Container Toolkit on the host.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  # ---- Stage 0: build the one shared chunk (CPU) -------------------------
+  prep:
+    build: { context: ., dockerfile: prep/Dockerfile }
+    image: carbonpoly/prep
+    env_file: [.env]
+    environment:
+      DATA_DIR: /data
+      RESULTS_DIR: /results
+    volumes:
+      - ./data:/data
+      - ./results:/results
+    command: ["python", "/app/prepare_chunk.py"]
+
+  # ---- Stage 1: Sonata vegetation mask (GPU) -----------------------------
+  # trains the trees+bushes head (cached) then writes chunk_masked_local.laz
+  sonata:
+    <<: *gpu
+    build: { context: ., dockerfile: sonata/Dockerfile }
+    image: carbonpoly/sonata
+    env_file: [.env]
+    environment:
+      DATA_DIR: /data
+      RESULTS_DIR: /results
+    volumes:
+      - ./data:/data
+      - ./results:/results
+    depends_on:
+      prep: { condition: service_completed_successfully }
+    command: ["bash", "-lc", "python /app/train_head.py && python /app/run_mask.py"]
+
+  # ---- Experiments 1 & 3: TreeLearn (GPU) --------------------------------
+  treelearn_raw:
+    <<: *gpu
+    build: { context: ., dockerfile: treelearn/Dockerfile }
+    image: carbonpoly/treelearn
+    env_file: [.env]
+    environment: { EXPERIMENT: raw, DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    depends_on:
+      prep: { condition: service_completed_successfully }
+
+  treelearn_masked:
+    <<: *gpu
+    image: carbonpoly/treelearn
+    env_file: [.env]
+    environment: { EXPERIMENT: masked, DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    depends_on:
+      treelearn_raw: { condition: service_started }
+      sonata: { condition: service_completed_successfully }
+
+  # ---- Experiments 2 & 4: SegmentAnyTree (official image, GPU) -----------
+  # Reads a folder of clouds from bucket_in_folder, writes to bucket_out_folder.
+  # The run script stages exactly one chunk into each *_in folder first.
+  segmentanytree_raw:
+    <<: *gpu
+    image: ${SAT_IMAGE:-maciekwielgosz/segment-any-tree:latest}
+    volumes:
+      - ./data/sat/raw_in:/home/nibio/mutable-outside-world/bucket_in_folder
+      - ./data/sat/raw_out:/home/nibio/mutable-outside-world/bucket_out_folder
+
+  segmentanytree_masked:
+    <<: *gpu
+    image: ${SAT_IMAGE:-maciekwielgosz/segment-any-tree:latest}
+    volumes:
+      - ./data/sat/masked_in:/home/nibio/mutable-outside-world/bucket_in_folder
+      - ./data/sat/masked_out:/home/nibio/mutable-outside-world/bucket_out_folder
+
+  # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
+  sat_render_raw:
+    image: carbonpoly/prep
+    environment: { EXPERIMENT: raw, DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/render_sat_output.py"]
+
+  sat_render_masked:
+    image: carbonpoly/prep
+    environment: { EXPERIMENT: masked, DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/render_sat_output.py"]
