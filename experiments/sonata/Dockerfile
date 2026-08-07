@@ -1,11 +1,12 @@
 # Sonata stage (frozen PTv3 + linear vegetation head). GPU required.
 #
-# Based on the exact Kaggle image the reference notebook was validated on
-# (sha from sonata-segr-gt/kernel-metadata.json), then replays the notebook's
-# proven install sequence. This is the highest-fidelity way to reproduce a
-# working Sonata/spconv environment without a GPU to test against locally.
-# (digest copied verbatim from sonata-segr-gt/kernel-metadata.json "docker_image")
-FROM gcr.io/kaggle-images/python@sha256:dafd4ce5668bbf1ad422e4c109e0f18c9623c3a7c7f48b0235f13142755c40b9
+# Built from Sonata's OWN environment.yml recipe: torch 2.5.x + CUDA 12.4, for
+# which the two compiled deps Sonata needs — torch-scatter (used by
+# sonata/model.py's grid pooling) and spconv — have guaranteed prebuilt wheels.
+# (Earlier this used the Kaggle image for notebook fidelity, but that image is a
+# ~35 GB moving target that rolled forward to Python 3.12 + a torch too new for
+# any torch-scatter wheel. A pinned base is smaller AND more reproducible.)
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
 ENV PYTHONUNBUFFERED=1 \
     CUMM_DISABLE_JIT=1 \
@@ -17,55 +18,26 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Replays notebook install cell 4. torch-scatter is pulled from the PyG wheel
-# index matching the base image's torch+cuda; falls back to source build.
-RUN python -c "import torch,sys; \
-    v=torch.__version__.split('+')[0]; \
-    cu=(torch.version.cuda or '12.4').replace('.',''); \
-    open('/tmp/tv','w').write(v+' '+cu); \
-    print('torch',v,'cuda',cu,'py',sys.version.split()[0])"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git build-essential libgl1 libgomp1 libx11-6 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Split into one layer per package group (was a single -q RUN). On a slow/flaky
-# link this lets a rebuild resume from the last successful layer instead of
-# re-downloading everything, and a failure names the exact package. Verbose on
-# purpose so build logs are debuggable.
-RUN pip install spconv-cu126
-# torch-scatter (required by sonata/model.py's grid pooling). PyG keys wheels by
-# torch MAJOR.MINOR.0 and only builds a few CUDA variants (cu118/cu121/cu124,
-# +cu126 for torch>=2.6) — the base image's torch.version.cuda may be a tag PyG
-# never built (e.g. cu126 for torch 2.5), so the naive URL misses and a source
-# build fails in-image. CUDA 12.x extension wheels are cross-compatible, so try
-# the reported tag then PyG's usual ones; --no-index fails fast; source-build is
-# the last resort. (`if pip ...` keeps a miss from tripping `set -e`.)
-RUN read TORCH_V CU < /tmp/tv; \
-    MM="$(echo "$TORCH_V" | cut -d. -f1-2).0"; \
-    echo "torch-scatter for torch ${TORCH_V} / cu${CU} (wheel key ${MM})"; \
-    OK=""; \
-    for TAG in "cu${CU}" cu124 cu126 cu121 cu118; do \
-      echo "  trying torch-${MM}+${TAG}"; \
-      if pip install --no-index torch-scatter -f "https://data.pyg.org/whl/torch-${MM}+${TAG}.html"; then OK=1; break; fi; \
-    done; \
-    if [ -z "$OK" ]; then \
-      echo "  no prebuilt wheel matched; building from source"; \
-      TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;9.0" FORCE_CUDA=1 pip install --no-build-isolation torch-scatter; \
-    fi
-RUN pip install -U "gdown>=6.1"
-RUN pip install huggingface_hub timm addict "laspy[lazrs]" plyfile
-RUN pip install open3d "numpy<2"
-RUN pip install matplotlib tqdm pandas py7zr
-RUN pip install "git+https://github.com/facebookresearch/sonata.git"
-
-# Some Kaggle images ship a stray setup.py/.gitignore in dist-packages that makes
-# pccm treat spconv as editable and JIT-compile (notebook cell 2 guards this).
-RUN python - <<'PY'
-import os, sys
-sp = f"/usr/local/lib/python3.{sys.version_info.minor}/dist-packages"
-for f in ("setup.py", ".gitignore"):
-    p = os.path.join(sp, f)
-    if os.path.exists(p):
-        os.rename(p, p + ".disabled")
-        print("renamed stray", f)
-PY
+# One layer per package group so a slow/flaky link resumes from the last
+# successful layer and any failure names the exact package.
+#
+# torch-scatter: PyG keys wheels by torch MAJOR.MINOR.0, so torch 2.5.1 uses the
+# torch-2.5.0+cu124 index (matches this base's CUDA 12.4). Verified to carry
+# cp310/311/312 wheels. spconv-cu124 matches CUDA 12.4. flash-attn is optional
+# and we run with enable_flash=False (as the notebook did), so it is NOT needed.
+RUN pip install --no-cache-dir "numpy<2"
+RUN pip install --no-cache-dir spconv-cu124
+RUN pip install --no-cache-dir torch-scatter \
+      -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
+RUN pip install --no-cache-dir -U "gdown>=6.1"
+RUN pip install --no-cache-dir huggingface_hub timm addict "laspy[lazrs]" plyfile
+RUN pip install --no-cache-dir open3d
+RUN pip install --no-cache-dir matplotlib tqdm pandas py7zr
+RUN pip install --no-cache-dir "git+https://github.com/facebookresearch/sonata.git"
 
 COPY common /app/common
 COPY sonata/sonata_lib.py /app/sonata_lib.py

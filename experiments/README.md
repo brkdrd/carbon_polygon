@@ -63,9 +63,10 @@ Either way you need Docker with **GPU passthrough into WSL2** — see
   (`samsuperman12/my-private-lidar-dataset`). Put `KAGGLE_USERNAME` / `KAGGLE_KEY`
   in `.env`, or drop the `.laz` into `experiments/data/raw/` yourself to skip
   Kaggle entirely.
-- Disk/RAM: the images are large (the Sonata image is the Kaggle GPU image; SAT
-  is ~10 GB). TreeLearn tile generation is RAM-heavy — a 40 m chunk is modest,
-  but budget several GB. TreeLearn needs ~10 GB VRAM.
+- Disk/RAM: the images are large (Sonata and TreeLearn build on PyTorch CUDA
+  bases, ~7 GB each; SegmentAnyTree is ~10 GB). TreeLearn tile generation is
+  RAM-heavy — a 40 m chunk is modest, but budget several GB. TreeLearn needs
+  ~10 GB VRAM.
 
 ## Giving WSL2 access to the GPU
 
