@@ -14,7 +14,9 @@ ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     DATA_DIR=/data \
     RESULTS_DIR=/results \
-    TL_REPO=/opt/TreeLearn
+    TL_REPO=/opt/TreeLearn \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git build-essential libgl1 libgomp1 libx11-6 \

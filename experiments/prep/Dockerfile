@@ -5,7 +5,9 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     KAGGLE_CONFIG_DIR=/root/.kaggle \
     DATA_DIR=/data \
-    RESULTS_DIR=/results
+    RESULTS_DIR=/results \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10
 
 WORKDIR /app
 
