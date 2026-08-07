@@ -25,16 +25,20 @@ RUN python -c "import torch,sys; \
     open('/tmp/tv','w').write(v+' '+cu); \
     print('torch',v,'cuda',cu,'py',sys.version.split()[0])"
 
-RUN set -eux; read TORCH_V CU < /tmp/tv; \
-    pip install -q spconv-cu126; \
+# Split into one layer per package group (was a single -q RUN). On a slow/flaky
+# link this lets a rebuild resume from the last successful layer instead of
+# re-downloading everything, and a failure names the exact package. Verbose on
+# purpose so build logs are debuggable.
+RUN pip install spconv-cu126
+RUN read TORCH_V CU < /tmp/tv; \
     IDX="https://data.pyg.org/whl/torch-${TORCH_V}+cu${CU}.html"; \
-    (pip install -q torch-scatter -f "$IDX" \
-      || pip install -q --no-build-isolation torch-scatter); \
-    pip install -q -U "gdown>=6.1"; \
-    pip install -q huggingface_hub timm addict "laspy[lazrs]" plyfile; \
-    pip install -q open3d "numpy<2"; \
-    pip install -q matplotlib tqdm pandas py7zr; \
-    pip install -q "git+https://github.com/facebookresearch/sonata.git"
+    pip install torch-scatter -f "$IDX" \
+      || pip install --no-build-isolation torch-scatter
+RUN pip install -U "gdown>=6.1"
+RUN pip install huggingface_hub timm addict "laspy[lazrs]" plyfile
+RUN pip install open3d "numpy<2"
+RUN pip install matplotlib tqdm pandas py7zr
+RUN pip install "git+https://github.com/facebookresearch/sonata.git"
 
 # Some Kaggle images ship a stray setup.py/.gitignore in dist-packages that makes
 # pccm treat spconv as editable and JIT-compile (notebook cell 2 guards this).
