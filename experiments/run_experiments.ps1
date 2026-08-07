@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 <#
-  run_experiments.ps1 — Windows PowerShell launcher for the four-experiment
+  run_experiments.ps1 - Windows PowerShell launcher for the four-experiment
   tree-segmentation study. Mirrors run_experiments.sh exactly.
 
   Usage (from the experiments/ folder):
@@ -46,7 +46,7 @@ function Build {
     # official image; pull is best-effort (mirrors `|| true`)
     try { & docker @($Compose + @("pull", "segmentanytree_raw")) } catch { }
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  (SegmentAnyTree pull skipped/failed — it will pull on run)" -ForegroundColor Yellow
+        Write-Host "  (SegmentAnyTree pull skipped/failed - it will pull on run)" -ForegroundColor Yellow
     }
 }
 
