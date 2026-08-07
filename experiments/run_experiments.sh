@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # One command to run the whole four-experiment tree-segmentation study.
 #
-#   ./run_experiments.sh            # build everything + run all four experiments
-#   ./run_experiments.sh build      # build/pull images only
+#   ./run_experiments.sh            # build + run the TreeLearn experiments (exp1, exp3)
+#   ./run_experiments.sh build      # build images only
 #   ./run_experiments.sh prep       # just build the shared chunk
-#   ./run_experiments.sh exp1|exp2|exp3|exp4   # a single experiment (deps must exist)
+#   ./run_experiments.sh exp1|exp2|exp3|exp4   # a single experiment (deps must
+#                                   # exist; exp2/exp4 need a non-Blackwell GPU)
 #
 # Requires: Docker + Compose, an NVIDIA GPU with the Container Toolkit, and
 # Kaggle credentials in .env (KAGGLE_USERNAME / KAGGLE_KEY).
@@ -19,9 +20,8 @@ RUN="$DC run --rm --no-deps"
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
 build() {
-  log "Building images (prep, sonata, treelearn) and pulling SegmentAnyTree"
+  log "Building images (prep, sonata, treelearn)"
   $DC build prep sonata treelearn_raw
-  $DC pull segmentanytree_raw || true   # official image; pull is best-effort
 }
 
 prep()   { log "Stage 0 — shared chunk";              $RUN prep; }
@@ -46,14 +46,15 @@ sat_run() { # $1 = raw|masked   $2 = source laz basename
 exp2() { sat_run raw    chunk_local.laz;        log "Rendering exp2"; $RUN sat_render_raw; }
 exp4() { sat_run masked chunk_masked_local.laz; log "Rendering exp4"; $RUN sat_render_masked; }
 
+# exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
+# compiled for sm_60-86 and cannot run on Blackwell (RTX 50xx). The exp2/exp4
+# targets still work when invoked explicitly (on compatible hardware).
 all() {
   build
-  prep            # shared chunk (exp1/exp2 input)
-  sonata          # vegetation mask (exp3/exp4 input)
+  prep            # shared chunk (exp1 input)
+  sonata          # vegetation mask (exp3 input)
   exp1            # TreeLearn / raw
   exp3            # TreeLearn / masked
-  exp2            # SegmentAnyTree / raw
-  exp4            # SegmentAnyTree / masked
   log "Done. Result images in ./results:"
   ls -1 results/*.png 2>/dev/null || true
 }

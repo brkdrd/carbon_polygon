@@ -4,11 +4,12 @@
   tree-segmentation study. Mirrors run_experiments.sh exactly.
 
   Usage (from the experiments/ folder):
-    .\run_experiments.ps1            # build everything + run all four experiments
-    .\run_experiments.ps1 build      # build/pull images only
+    .\run_experiments.ps1            # build + run the TreeLearn experiments (exp1, exp3)
+    .\run_experiments.ps1 build      # build images only
     .\run_experiments.ps1 prep       # just build the shared chunk
     .\run_experiments.ps1 sonata     # Sonata vegetation mask
-    .\run_experiments.ps1 exp1       # a single experiment (exp1..exp4)
+    .\run_experiments.ps1 exp1       # a single experiment (exp1..exp4;
+                                     # exp2/exp4 need a non-Blackwell GPU)
 
   If PowerShell blocks the script, launch it as:
     powershell -ExecutionPolicy Bypass -File .\run_experiments.ps1
@@ -41,13 +42,8 @@ function Invoke-Docker([string[]]$DockerArgs) {
 function Invoke-Stage($svc) { Invoke-Docker ($Compose + @("run", "--rm", "--no-deps", $svc)) }
 
 function Build {
-    Log "Building images (prep, sonata, treelearn) and pulling SegmentAnyTree"
+    Log "Building images (prep, sonata, treelearn)"
     Invoke-Docker ($Compose + @("build", "prep", "sonata", "treelearn_raw"))
-    # official image; pull is best-effort (mirrors `|| true`)
-    try { & docker @($Compose + @("pull", "segmentanytree_raw")) } catch { }
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  (SegmentAnyTree pull skipped/failed - it will pull on run)" -ForegroundColor Yellow
-    }
 }
 
 function Prep   { Log "Stage 0 - shared chunk";           Invoke-Stage "prep" }
@@ -74,14 +70,15 @@ function Invoke-Sat($kind, $src) {
 function Exp2 { Invoke-Sat "raw"    "chunk_local.laz";        Log "Rendering exp2"; Invoke-Stage "sat_render_raw" }
 function Exp4 { Invoke-Sat "masked" "chunk_masked_local.laz"; Log "Rendering exp4"; Invoke-Stage "sat_render_masked" }
 
+# exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
+# compiled for sm_60-86 and cannot run on Blackwell (RTX 50xx). The exp2/exp4
+# targets still work when invoked explicitly (on compatible hardware).
 function Invoke-All {
     Build
-    Prep            # shared chunk (exp1/exp2 input)
-    Sonata          # vegetation mask (exp3/exp4 input)
+    Prep            # shared chunk (exp1 input)
+    Sonata          # vegetation mask (exp3 input)
     Exp1            # TreeLearn / raw
     Exp3            # TreeLearn / masked
-    Exp2            # SegmentAnyTree / raw
-    Exp4            # SegmentAnyTree / masked
     Log "Done. Result images in .\results:"
     Get-ChildItem -Path "results\*.png" -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Name
