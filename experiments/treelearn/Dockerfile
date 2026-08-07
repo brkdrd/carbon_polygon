@@ -1,14 +1,15 @@
-# TreeLearn stage. GPU required. The repo ships no Dockerfile, so this mirrors
-# setup/setup.sh: CUDA 11.8 + PyTorch + spconv-cu118 (the load-bearing native
-# dep). Do NOT bump to CUDA 12.x without switching the spconv variant — a
-# CUDA/spconv mismatch silently breaks inference (the repo's Colab is broken for
-# exactly this reason).
-#
-# NOTE on the tag: setup.sh installs torch 2.0.0 with pytorch-cuda=11.8 via
-# CONDA, but Docker Hub has no such image — pytorch/pytorch:2.0.0 only ships
-# cuda11.7. 2.1.0-cuda11.8-cudnn8-devel is the lowest published torch that keeps
-# CUDA 11.8 (so spconv-cu118 stays valid); 2.1 is API-compatible with TreeLearn.
-FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
+# TreeLearn stage. GPU required. The repo ships no Dockerfile; its setup.sh
+# recipe is CUDA 11.8 + torch 2.0 + spconv-cu118, but that stack cannot run on
+# Blackwell (RTX 50xx, sm_120) — torch cu118 kernels stop at sm_90 and die with
+# "no kernel image is available". So this uses torch 2.7 + CUDA 12.8 (the
+# oldest Blackwell-capable stack) and swaps the CUDA-keyed pins to match: the
+# repo's spconv-cu118 → spconv-cu126 (newest spconv build; JIT-compiles for
+# sm_120 via NVRTC), and open3d 0.17.0 → 0.18.0 (this base is Python 3.11;
+# 0.18.0 is the first open3d with a cp311 wheel). We only run TreeLearn
+# inference from a pretrained checkpoint, so the known Blackwell
+# spconv-backward issue doesn't apply. torch 2.1→2.7 is API-compatible for
+# TreeLearn's usage.
+FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel
 
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
@@ -28,8 +29,12 @@ RUN git clone https://github.com/ecker-lab/TreeLearn.git /opt/TreeLearn \
     && cd /opt/TreeLearn && git checkout ${TL_REF}
 
 WORKDIR /opt/TreeLearn
-# requirements.txt pins spconv-cu118, numpy==1.24.4, open3d, laspy[lazrs], etc.
-RUN pip install --no-cache-dir -r setup/requirements.txt \
+# requirements.txt pins spconv-cu118 and open3d==0.17.0, both wrong for this
+# base (CUDA 12.8 / Python 3.11) — rewrite those two pins, keep the rest.
+RUN sed -e 's/^spconv-cu118.*/spconv-cu126/' \
+        -e 's/^open3d==0.17.0/open3d==0.18.0/' \
+        setup/requirements.txt > /tmp/requirements.cu128.txt \
+    && pip install --no-cache-dir -r /tmp/requirements.cu128.txt \
     && pip install --no-cache-dir -e . \
     && pip install --no-cache-dir matplotlib pyyaml
 

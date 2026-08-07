@@ -162,8 +162,9 @@ built exactly once — so the four experiments provably share one input.
 | `sat_render_raw` / `_masked` | reuses `prep` image (CPU) | — | render SAT output → exp2 / exp4 |
 
 - **TreeLearn** ([ecker-lab/TreeLearn](https://github.com/ecker-lab/TreeLearn))
-  ships no image, so `treelearn/Dockerfile` reproduces its `setup.sh`
-  (CUDA 11.8 + PyTorch 2.0 + `spconv-cu118`). Pretrained weights
+  ships no image, so `treelearn/Dockerfile` reproduces its `setup.sh` on a
+  CUDA 12.8 + PyTorch 2.7 base (`spconv-cu126`) — the repo's own CUDA 11.8
+  recipe cannot run on Blackwell (RTX 50xx). Pretrained weights
   (`model_weights_20241213`) download to `data/models/treelearn/` on first run.
   Output carries a per-point `treeID` (0 = non-tree, 1..N = trees).
 - **SegmentAnyTree** ([SmartForest-no/SegmentAnyTree](https://github.com/SmartForest-no/SegmentAnyTree))
@@ -171,7 +172,9 @@ built exactly once — so the four experiments provably share one input.
   a folder of clouds and writes `final_results/*.laz` with a `PredInstance`
   dimension. The default image is compiled for GPU arch sm_60…sm_86; on
   **RTX 40xx / H100** set `SAT_IMAGE=maciekwielgosz/segment-any-tree-cuda11.8.0`
-  in `.env`.
+  in `.env`. **RTX 50xx (Blackwell, sm_120) is not supported by either official
+  image** — CUDA 11.8 predates the architecture entirely — so the SAT stages
+  (exp 2 & 4) need a CPU fallback or a self-rebuilt image on that hardware.
 
 ## Notes & caveats
 

@@ -1,16 +1,17 @@
 # Sonata stage (frozen PTv3 + linear vegetation head). GPU required.
 #
-# Built from Sonata's OWN environment.yml recipe: torch 2.5.x + CUDA 12.4, for
-# which the two compiled deps Sonata needs — torch-scatter (used by
-# sonata/model.py's grid pooling) and spconv — have guaranteed prebuilt wheels.
-# (Earlier this used the Kaggle image for notebook fidelity, but that image is a
-# ~35 GB moving target that rolled forward to Python 3.12 + a torch too new for
-# any torch-scatter wheel. A pinned base is smaller AND more reproducible.)
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+# torch 2.7 + CUDA 12.8: the oldest stack that runs on Blackwell (RTX 50xx,
+# sm_120) — torch cu124/cu126 builds ship kernels only up to sm_90 and die with
+# "no kernel image is available". The two compiled deps Sonata needs are
+# torch-scatter (sonata/model.py grid pooling; PyG publishes pt27cu128 wheels)
+# and spconv (every block's CPE). No spconv-cu128 wheel exists; spconv-cu126
+# covers sm_120 via its NVRTC runtime-compile fallback for archs missing from
+# the prebuilt set — which is why JIT must NOT be disabled here. Our backbone
+# runs inference-only (@torch.no_grad in sonata_lib), so the known Blackwell
+# spconv-backward issue doesn't apply.
+FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel
 
 ENV PYTHONUNBUFFERED=1 \
-    CUMM_DISABLE_JIT=1 \
-    SPCONV_DISABLE_JIT=1 \
     DATA_DIR=/data \
     RESULTS_DIR=/results \
     PIP_DEFAULT_TIMEOUT=120 \
@@ -25,14 +26,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # One layer per package group so a slow/flaky link resumes from the last
 # successful layer and any failure names the exact package.
 #
-# torch-scatter: PyG keys wheels by torch MAJOR.MINOR.0, so torch 2.5.1 uses the
-# torch-2.5.0+cu124 index (matches this base's CUDA 12.4). Verified to carry
-# cp310/311/312 wheels. spconv-cu124 matches CUDA 12.4. flash-attn is optional
-# and we run with enable_flash=False (as the notebook did), so it is NOT needed.
+# torch-scatter: PyG keys wheels by torch MAJOR.MINOR.0, so torch 2.7.1 uses the
+# torch-2.7.0+cu128 index (matches this base's CUDA 12.8). Verified to carry
+# cp310/311/312 wheels. spconv-cu126 is the newest spconv build (no cu128
+# exists); it runs on CUDA 12.8 and JIT-compiles for sm_120. flash-attn is
+# optional and we run with enable_flash=False (as the notebook did), so it is
+# NOT needed.
 RUN pip install --no-cache-dir "numpy<2"
-RUN pip install --no-cache-dir spconv-cu124
+RUN pip install --no-cache-dir spconv-cu126
 RUN pip install --no-cache-dir torch-scatter \
-      -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
+      -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
 RUN pip install --no-cache-dir -U "gdown>=6.1"
 RUN pip install --no-cache-dir huggingface_hub timm addict "laspy[lazrs]" plyfile
 RUN pip install --no-cache-dir open3d
