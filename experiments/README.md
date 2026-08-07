@@ -34,6 +34,25 @@ land in `experiments/results/*.png`.
 Run a single stage if you want: `./run_experiments.sh prep` (just the chunk),
 `./run_experiments.sh sonata`, `./run_experiments.sh exp1` … `exp4`.
 
+### Windows
+
+Two options, both use the same images and compose file:
+
+- **WSL2 (simplest):** open your WSL2 distro and run `./run_experiments.sh`
+  unchanged.
+- **Native PowerShell:** use the equivalent launcher
+
+  ```powershell
+  cd experiments
+  Copy-Item .env.example .env      # then fill in KAGGLE_USERNAME / KAGGLE_KEY
+  .\run_experiments.ps1            # or: build | prep | sonata | exp1..exp4
+  ```
+
+  If execution policy blocks it: `powershell -ExecutionPolicy Bypass -File .\run_experiments.ps1`.
+
+Either way you need Docker with **GPU passthrough into WSL2** — see
+[Giving WSL2 access to the GPU](#giving-wsl2-access-to-the-gpu) below.
+
 ## Requirements
 
 - **Docker** + **Compose v2**.
@@ -47,6 +66,50 @@ Run a single stage if you want: `./run_experiments.sh prep` (just the chunk),
 - Disk/RAM: the images are large (the Sonata image is the Kaggle GPU image; SAT
   is ~10 GB). TreeLearn tile generation is RAM-heavy — a 40 m chunk is modest,
   but budget several GB. TreeLearn needs ~10 GB VRAM.
+
+## Giving WSL2 access to the GPU
+
+To run the CUDA containers on Windows, the GPU has to reach the Linux side. What
+you need depends on how Docker is installed:
+
+**Prerequisites (both options):**
+- Windows 10 21H2+ or Windows 11, WSL2 (not WSL1); `wsl --update`.
+- The **NVIDIA driver installed on Windows** (any recent GeForce/RTX/Quadro
+  driver includes WSL2 CUDA support). **Do not install a Linux GPU driver inside
+  WSL** — the Windows driver projects the GPU in and provides `libcuda`;
+  installing a driver in WSL breaks it.
+- Verify inside WSL2: `nvidia-smi` should list your GPU (it lives in
+  `/usr/lib/wsl/lib/`). If it works, the GPU is visible to Linux.
+
+**Option A — Docker Desktop (least setup):** enable the WSL2 backend
+(Settings → General → *Use the WSL 2 based engine*) and WSL integration
+(Settings → Resources → *WSL Integration*). GPU support is built in — no
+container toolkit to install. `docker run --gpus all …` just works.
+
+**Option B — Docker Engine inside WSL2** (what a bare `apt install docker.io`
+gives you; `docker info` shows only the `runc` runtime): install the **NVIDIA
+Container Toolkit** in the distro:
+
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker   # registers the nvidia runtime
+sudo service docker restart                            # or: systemctl restart docker
+```
+
+**Verify GPU passthrough (either option):**
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+```
+
+If that prints your GPU, `./run_experiments.sh` / `run_experiments.ps1` will too.
+(Keep project files under the WSL/Linux filesystem, not `/mnt/c/...`, for
+tolerable I/O speed.)
 
 ## The float32 coordinate trap — and how it's handled
 

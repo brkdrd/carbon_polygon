@@ -1,0 +1,7 @@
+# Keep container-side and shell-invoked files LF, even when checked out on
+# Windows — CRLF breaks bash scripts and Dockerfile heredocs inside the Linux
+# images / WSL2. PowerShell keeps CRLF.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.yml       text eol=lf
+*.ps1       text eol=crlf
