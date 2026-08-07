@@ -1,9 +1,14 @@
 # TreeLearn stage. GPU required. The repo ships no Dockerfile, so this mirrors
-# setup/setup.sh: CUDA 11.8 + PyTorch 2.0.0 + spconv-cu118 (the load-bearing
-# native dep). Do NOT bump to CUDA 12.x without switching the spconv variant —
-# a CUDA/spconv mismatch silently breaks inference (the repo's Colab is broken
-# for exactly this reason).
-FROM pytorch/pytorch:2.0.0-cuda11.8-cudnn8-devel
+# setup/setup.sh: CUDA 11.8 + PyTorch + spconv-cu118 (the load-bearing native
+# dep). Do NOT bump to CUDA 12.x without switching the spconv variant — a
+# CUDA/spconv mismatch silently breaks inference (the repo's Colab is broken for
+# exactly this reason).
+#
+# NOTE on the tag: setup.sh installs torch 2.0.0 with pytorch-cuda=11.8 via
+# CONDA, but Docker Hub has no such image — pytorch/pytorch:2.0.0 only ships
+# cuda11.7. 2.1.0-cuda11.8-cudnn8-devel is the lowest published torch that keeps
+# CUDA 11.8 (so spconv-cu118 stays valid); 2.1 is API-compatible with TreeLearn.
+FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-devel
 
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
