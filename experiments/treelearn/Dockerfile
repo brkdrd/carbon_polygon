@@ -29,6 +29,10 @@ RUN git clone https://github.com/ecker-lab/TreeLearn.git /opt/TreeLearn \
     && cd /opt/TreeLearn && git checkout ${TL_REF}
 
 WORKDIR /opt/TreeLearn
+# Resume stalled wheel downloads instead of failing (placed after the clone
+# layer to keep its cache).
+ENV PIP_RESUME_RETRIES=10
+
 # requirements.txt pins spconv-cu118 and open3d==0.17.0, both wrong for this
 # base (CUDA 12.8 / Python 3.11) — rewrite those two pins, keep the rest.
 RUN sed -e 's/^spconv-cu118.*/spconv-cu126/' \

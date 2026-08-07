@@ -34,6 +34,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # NOT needed.
 RUN pip install --no-cache-dir "numpy<2"
 RUN pip install --no-cache-dir spconv-cu126
+# Resume stalled wheel downloads instead of failing (data.pyg.org in particular
+# stalls mid-transfer). ENV sits here, not in the top block, so the already-
+# built layers above keep their cache.
+ENV PIP_RESUME_RETRIES=10
 RUN pip install --no-cache-dir torch-scatter \
       -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
 RUN pip install --no-cache-dir -U "gdown>=6.1"
