@@ -30,10 +30,16 @@ RUN python -c "import torch,sys; \
 # re-downloading everything, and a failure names the exact package. Verbose on
 # purpose so build logs are debuggable.
 RUN pip install spconv-cu126
+# torch-scatter: PyG publishes wheels keyed by torch MAJOR.MINOR.0 (NOT the exact
+# patch), so a URL with e.g. 2.4.1 has no wheel and pip silently falls to a
+# failing source build. Build the .0 key; --no-index makes each wheel attempt
+# fail fast so we only source-build as a last resort.
 RUN read TORCH_V CU < /tmp/tv; \
-    IDX="https://data.pyg.org/whl/torch-${TORCH_V}+cu${CU}.html"; \
-    pip install torch-scatter -f "$IDX" \
-      || pip install --no-build-isolation torch-scatter
+    MM="$(echo "$TORCH_V" | cut -d. -f1-2).0"; \
+    echo "torch-scatter for torch ${TORCH_V} / cu${CU} (wheel key ${MM})"; \
+    pip install --no-index torch-scatter -f "https://data.pyg.org/whl/torch-${MM}+cu${CU}.html" \
+      || pip install --no-index torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_V}+cu${CU}.html" \
+      || TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;9.0" FORCE_CUDA=1 pip install --no-build-isolation torch-scatter
 RUN pip install -U "gdown>=6.1"
 RUN pip install huggingface_hub timm addict "laspy[lazrs]" plyfile
 RUN pip install open3d "numpy<2"
