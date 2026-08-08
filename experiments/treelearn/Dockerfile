@@ -64,7 +64,9 @@ RUN grep -q "torch.load(checkpoint, map_location=" ${TL_REPO}/tree_learn/util/tr
 # Guard both so such a run finishes and reports zero instances instead.
 RUN grep -q "^def group_hdbscan(cluster_coords" ${TL_REPO}/tree_learn/util/pipeline.py \
     && grep -q "reference_idx = np.argwhere(predictions != remaining_points_idx)" ${TL_REPO}/tree_learn/util/pipeline.py \
+    && grep -q "^def save_data(data" ${TL_REPO}/tree_learn/util/pipeline.py \
     && sed -i \
+        -e '/^def save_data(data/a\    if len(data) == 0: return  # empty laz breaks the offset/color math below' \
         -e '/^def group_hdbscan(cluster_coords/a\    if len(cluster_coords) == 0: return np.zeros(0, dtype=np.int64)' \
         -e '/^def group_dbscan(cluster_coords/a\    if len(cluster_coords) == 0: return np.zeros(0, dtype=np.int64)' \
         -e '/reference_idx = np.argwhere(predictions != remaining_points_idx)/a\    if len(query_idx) == 0 or len(reference_idx) == 0: return predictions.astype(np.int64)' \
