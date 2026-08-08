@@ -115,10 +115,41 @@ def main():
         infer_box(np.where(m)[0])
 
     cov = lcnt > 0
-    pred = np.zeros(len(tile_xyz), np.int64)
-    pred[cov] = lsum[cov].argmax(1)
-    veg = pred == 1
-    print(f"[sonata] covered {cov.mean()*100:.1f}% | vegetation {veg.mean()*100:.2f}%")
+    # Recall-biased decision. argmax is an implicit 0.5 threshold, and the head
+    # under-calls exactly the classes with weak supervision (bushes; bare
+    # trunks, which look least vegetation-like) — so accept vegetation at a
+    # lower probability. VEG_THRESH=0.5 restores the old argmax behavior.
+    thresh = float(os.environ.get("VEG_THRESH", "0.35"))
+    logit_diff = np.zeros(len(tile_xyz), np.float32)
+    logit_diff[cov] = (lsum[cov, 1] - lsum[cov, 0]) / lcnt[cov]
+    p_veg = 1.0 / (1.0 + np.exp(-logit_diff))
+    veg = cov & (p_veg >= thresh)
+    print(f"[sonata] covered {cov.mean()*100:.1f}% | vegetation {veg.mean()*100:.2f}% "
+          f"(thresh {thresh}; argmax would give "
+          f"{(cov & (p_veg >= 0.5)).mean()*100:.2f}%)")
+
+    # Geometric dilation: region-grow the mask so it walks down trunk point
+    # chains and across partially-detected bushes. Each iteration adds points
+    # within VEG_DILATE_R of the current mask, so reach is R * iters. Trade-off:
+    # foliage touching the ground lets the mask creep outward along it — keep
+    # iterations modest and judge in the mask image.
+    r = float(os.environ.get("VEG_DILATE_R", "0.75"))
+    iters = int(os.environ.get("VEG_DILATE_ITERS", "3"))
+    if r > 0 and iters > 0 and veg.any():
+        from scipy.spatial import cKDTree
+        before = int(veg.sum())
+        for _ in range(iters):
+            rest = np.where(~veg)[0]
+            if rest.size == 0:
+                break
+            d, _ = cKDTree(tile_xyz[veg]).query(
+                tile_xyz[rest], k=1, distance_upper_bound=r, workers=-1)
+            grown = rest[np.isfinite(d)]
+            if grown.size == 0:
+                break
+            veg[grown] = True
+        print(f"[sonata] dilation (+{iters}x{r}m): {before:,} -> {veg.sum():,} "
+              f"veg pts ({veg.mean()*100:.2f}%)")
 
     # ---- write masked chunk (vegetation only) for exp3/exp4 ----
     C.CHUNK_DIR.mkdir(parents=True, exist_ok=True)

@@ -45,6 +45,9 @@ RUN pip install --no-cache-dir huggingface_hub timm addict "laspy[lazrs]" plyfil
 RUN pip install --no-cache-dir open3d
 RUN pip install --no-cache-dir matplotlib tqdm pandas py7zr
 RUN pip install --no-cache-dir "git+https://github.com/facebookresearch/sonata.git"
+# scipy: cKDTree for the mask dilation in run_mask.py (own layer to keep the
+# layers above cached)
+RUN pip install --no-cache-dir scipy
 
 COPY common /app/common
 COPY sonata/sonata_lib.py /app/sonata_lib.py
