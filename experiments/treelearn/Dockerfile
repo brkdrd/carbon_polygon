@@ -44,8 +44,11 @@ RUN sed -e 's/^spconv-cu118.*/spconv-cu126/' \
 
 # tree_learn/util/logger.py imports tensorboardX, but upstream installs it (and
 # tensorboard) via conda in setup.sh, not requirements.txt — so mirroring only
-# requirements.txt missed them. Own layer so the big install above stays cached.
-RUN pip install --no-cache-dir tensorboardX tensorboard
+# requirements.txt missed them. timm here OVERRIDES the requirements.txt pin
+# (0.6.12): that release's dataclasses break on this base's Python 3.11, and
+# TreeLearn only uses timm.scheduler.CosineLRScheduler, unchanged in 0.9.x.
+# Own layer (not a sed above) so the big install layer stays cached.
+RUN pip install --no-cache-dir tensorboardX tensorboard "timm==0.9.16"
 
 COPY common /app/common
 COPY treelearn/run_treelearn.py /app/run_treelearn.py
