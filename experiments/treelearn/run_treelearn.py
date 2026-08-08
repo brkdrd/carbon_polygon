@@ -138,14 +138,21 @@ def main():
         shutil.rmtree(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    # TreeLearn tiles land in a shared dir (/data/tiles) and its dataset loads
-    # EVERY file there (os.listdir, no plot filter) — a previous run's tiles for
-    # a different chunk would join this inference and then blow up the
-    # hash-based back-propagation to original points (KeyError). Tiles are
-    # regenerated every run (tile_generation: True), so wiping loses nothing.
-    tiles_dir = C.DATA / "tiles"
-    if tiles_dir.exists():
-        shutil.rmtree(tiles_dir)
+    # Stage the input inside a per-experiment working dir. TreeLearn treats the
+    # input file's grandparent as its scratch base: it drops tiles/, forest/,
+    # forest_voxelized*/ etc. there, its dataset then loads EVERY tile in that
+    # shared folder (os.listdir, no plot filter), and it even REWRITES
+    # <input>.npz next to the input file — so pointing it straight at
+    # /data/chunk mixed tiles across experiments and clobbered the npz
+    # artifacts prep/sonata wrote there. A fresh dir per run also prevents a
+    # stale voxelized/tile cache from surviving an upstream chunk regeneration.
+    work = C.DATA / "treelearn" / f"work_{exp}"
+    if work.exists():
+        shutil.rmtree(work)
+    staged = work / "forest" / forest.name
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(forest, staged)
+    forest = staged
 
     ckpt = ensure_weights()
     cfg = build_config(forest, ckpt, results_dir)
