@@ -108,7 +108,12 @@ def read_instances(results_dir: Path):
         names = [d.name for d in las.point_format.dimensions]
         if "treeID" in names:
             xyz = np.column_stack([las.x, las.y, las.z]).astype(np.float64)
-            return xyz, np.asarray(las["treeID"], dtype=np.int64)
+            inst = np.asarray(las["treeID"], dtype=np.int64)
+            # treeID is stored as uint32, so TreeLearn's "tree but never
+            # assigned to an instance" sentinel (-1) wraps to 2**32-1 on save
+            # and would masquerade as one giant instance. Map it back.
+            inst[inst == 0xFFFFFFFF] = -1
+            return xyz, inst
 
     npzs = sorted(results_dir.rglob("*pointwise*.npz")) or sorted(results_dir.rglob("*.npz"))
     for p in npzs:
