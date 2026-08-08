@@ -42,6 +42,11 @@ RUN sed -e 's/^spconv-cu118.*/spconv-cu126/' \
     && pip install --no-cache-dir -e . \
     && pip install --no-cache-dir matplotlib pyyaml
 
+# tree_learn/util/logger.py imports tensorboardX, but upstream installs it (and
+# tensorboard) via conda in setup.sh, not requirements.txt — so mirroring only
+# requirements.txt missed them. Own layer so the big install above stays cached.
+RUN pip install --no-cache-dir tensorboardX tensorboard
+
 COPY common /app/common
 COPY treelearn/run_treelearn.py /app/run_treelearn.py
 
