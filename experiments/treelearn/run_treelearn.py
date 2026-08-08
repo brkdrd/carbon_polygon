@@ -68,9 +68,32 @@ def build_config(forest_path: Path, ckpt: Path, results_dir: Path) -> Path:
     cfg["save_cfg"]["save_formats"] = ["laz"]
     cfg["save_cfg"]["save_pointwise"] = True
     cfg["save_cfg"]["return_type"] = "original"
+    # We only consume the full-forest laz; the treewise branch also breaks on
+    # zero-instance results (indexes per-instance arrays that are then empty).
+    cfg["save_cfg"]["save_treewise"] = False
     out = TL_REPO / "configs" / "pipeline" / "_run.yaml"
     out.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return out
+
+
+def report_filter_diagnostics(results_dir: Path):
+    """Show how many points pass each of TreeLearn's clustering filters
+    (thresholds from configs/_modular/grouping.yaml: 0.5 / 0.6 / 4). Explains
+    WHY an instance count is low/zero — e.g. a vegetation mask that kept canopy
+    but dropped the trunk points TreeLearn clusters on."""
+    p = next(results_dir.rglob("pointwise_results.npz"), None)
+    if p is None:
+        return
+    d = np.load(p)
+    logits = d["semantic_prediction_logits"].astype(np.float64)
+    probs = np.exp(logits - logits.max(axis=1, keepdims=True))
+    probs /= probs.sum(axis=1, keepdims=True)
+    tree = probs[:, 0] >= 0.5           # tree class = 0
+    vert = d["input_feats"][:, -1] > 0.6
+    off = np.abs(d["offset_predictions"][:, 2]) < 4
+    print(f"[treelearn] clustering filters on {len(tree):,} voxelized pts: "
+          f"tree-conf {tree.sum():,} | verticality {vert.sum():,} | "
+          f"z-offset {off.sum():,} | all three {(tree & vert & off).sum():,}")
 
 
 def read_instances(results_dir: Path):
@@ -132,6 +155,7 @@ def main():
     if r.returncode != 0:
         raise SystemExit(f"[treelearn] pipeline exited {r.returncode}")
 
+    report_filter_diagnostics(results_dir)
     xyz, inst = read_instances(results_dir)
     n = len(set(inst.tolist()) - {0, -1})
     print(f"[treelearn] {exp}: {n} tree instances")

@@ -57,6 +57,19 @@ RUN grep -q "torch.load(checkpoint, map_location=" ${TL_REPO}/tree_learn/util/tr
     && sed -i "s/torch.load(checkpoint, map_location=/torch.load(checkpoint, weights_only=False, map_location=/" \
         ${TL_REPO}/tree_learn/util/train.py
 
+# The pipeline crashes when NO point passes the grouping filters (tree
+# confidence AND verticality AND |z-offset| — i.e. trunk-like points), which
+# legitimately happens on masked/partial clouds: HDBSCAN refuses empty input,
+# and the remaining-points KNN then has zero reference points to fit on.
+# Guard both so such a run finishes and reports zero instances instead.
+RUN grep -q "^def group_hdbscan(cluster_coords" ${TL_REPO}/tree_learn/util/pipeline.py \
+    && grep -q "reference_idx = np.argwhere(predictions != remaining_points_idx)" ${TL_REPO}/tree_learn/util/pipeline.py \
+    && sed -i \
+        -e '/^def group_hdbscan(cluster_coords/a\    if len(cluster_coords) == 0: return np.zeros(0, dtype=np.int64)' \
+        -e '/^def group_dbscan(cluster_coords/a\    if len(cluster_coords) == 0: return np.zeros(0, dtype=np.int64)' \
+        -e '/reference_idx = np.argwhere(predictions != remaining_points_idx)/a\    if len(query_idx) == 0 or len(reference_idx) == 0: return predictions.astype(np.int64)' \
+        ${TL_REPO}/tree_learn/util/pipeline.py
+
 COPY common /app/common
 COPY treelearn/run_treelearn.py /app/run_treelearn.py
 
