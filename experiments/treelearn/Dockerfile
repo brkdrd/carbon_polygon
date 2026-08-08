@@ -50,6 +50,13 @@ RUN sed -e 's/^spconv-cu118.*/spconv-cu126/' \
 # Own layer (not a sed above) so the big install layer stays cached.
 RUN pip install --no-cache-dir tensorboardX tensorboard "timm==0.9.16"
 
+# torch >= 2.6 defaults torch.load to weights_only=True, which can reject the
+# pretrained checkpoint (written by torch 2.0). The checkpoint is trusted, so
+# restore the old behavior at TreeLearn's single torch.load call site.
+RUN grep -q "torch.load(checkpoint, map_location=" ${TL_REPO}/tree_learn/util/train.py \
+    && sed -i "s/torch.load(checkpoint, map_location=/torch.load(checkpoint, weights_only=False, map_location=/" \
+        ${TL_REPO}/tree_learn/util/train.py
+
 COPY common /app/common
 COPY treelearn/run_treelearn.py /app/run_treelearn.py
 
