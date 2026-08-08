@@ -115,6 +115,15 @@ def main():
         shutil.rmtree(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
+    # TreeLearn tiles land in a shared dir (/data/tiles) and its dataset loads
+    # EVERY file there (os.listdir, no plot filter) — a previous run's tiles for
+    # a different chunk would join this inference and then blow up the
+    # hash-based back-propagation to original points (KeyError). Tiles are
+    # regenerated every run (tile_generation: True), so wiping loses nothing.
+    tiles_dir = C.DATA / "tiles"
+    if tiles_dir.exists():
+        shutil.rmtree(tiles_dir)
+
     ckpt = ensure_weights()
     cfg = build_config(forest, ckpt, results_dir)
     print(f"[treelearn] running pipeline on {forest.name} -> {results_dir}")
