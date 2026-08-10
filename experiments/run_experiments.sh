@@ -46,6 +46,13 @@ sat_run() { # $1 = raw|masked   $2 = source laz basename
 exp2() { sat_run raw    chunk_local.laz;        log "Rendering exp2"; $RUN sat_render_raw; }
 exp4() { sat_run masked chunk_masked_local.laz; log "Rendering exp4"; $RUN sat_render_masked; }
 
+# BaseWalker (tree-base detection; separate study track)
+bw_build() { log "Building basewalker image"; $DC build sonata; $DC build basewalker_prep; }
+bw_prep()  { log "BaseWalker — scene prep";   $RUN basewalker_prep; }
+bw_train() { log "BaseWalker — training";     $RUN basewalker_train; }
+bw_infer() { log "BaseWalker — inference";    $RUN basewalker_infer; }
+basewalker() { bw_build; bw_prep; bw_train; bw_infer; }
+
 # exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
 # compiled for sm_60-86 and cannot run on Blackwell (RTX 50xx). The exp2/exp4
 # targets still work when invoked explicitly (on compatible hardware).
@@ -65,5 +72,7 @@ case "${1:-all}" in
   prep) prep ;;
   sonata) sonata ;;
   exp1) exp1 ;; exp2) exp2 ;; exp3) exp3 ;; exp4) exp4 ;;
+  basewalker) basewalker ;;
+  bw_prep) bw_build; bw_prep ;; bw_train) bw_train ;; bw_infer) bw_infer ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4]"; exit 2 ;;
 esac

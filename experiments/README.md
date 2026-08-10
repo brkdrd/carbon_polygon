@@ -176,6 +176,25 @@ built exactly once — so the four experiments provably share one input.
   image** — CUDA 11.8 predates the architecture entirely — so the SAT stages
   (exp 2 & 4) need a CPU fallback or a self-rebuilt image on that hardware.
 
+## BaseWalker (tree-base detection — separate study track)
+
+Direct detection of tree base points instead of instance segmentation: walkers
+seeded on a CSF ground surface iteratively step toward the nearest tree base
+(frozen Sonata encoder on a small sphere crop → gated cross-attention decoder →
+offset + confidence), trained on the campus RTK stem map (`basewalker/
+poderevka.csv`, ~4k bases, fork-merged, spatial train/val split). Detections =
+walker endpoints after NMS; metrics are P/R/F1 vs the held-out val block.
+
+```
+./run_experiments.sh bw_prep    # scene tiles + normals + DEM + labels + seeds
+./run_experiments.sh bw_train   # trains the walker decoder (GPU, ~hours)
+./run_experiments.sh bw_infer   # detections + metrics + results image
+```
+
+Knobs (env): `BW_SPHERE_R` (2 m), `BW_STEPS` (8), `BW_GAMMA` (0.85),
+`BW_CONF_R` (0.5 m), `BW_NMS_R` (0.5 m), `BW_ITERS`, `BW_BATCH`,
+`BW_UTM_EPSG` (32652), `BW_DEM_METHOD` (csf|percentile).
+
 ## Notes & caveats
 
 - **"Trees + bushes" — combined training sources.** The vegetation head is

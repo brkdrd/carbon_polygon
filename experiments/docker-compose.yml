@@ -84,6 +84,34 @@ services:
       - ./data/sat/masked_in:/home/nibio/mutable-outside-world/bucket_in_folder
       - ./data/sat/masked_out:/home/nibio/mutable-outside-world/bucket_out_folder
 
+  # ---- BaseWalker: iterative tree-base detection (own study track) -------
+  # Image builds FROM carbonpoly/sonata — build the sonata service first
+  # (the run scripts' bw targets do). prep is CPU (normals + CSF DEM);
+  # train/infer need the GPU.
+  basewalker_prep:
+    build: { context: ., dockerfile: basewalker/Dockerfile }
+    image: carbonpoly/basewalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/prep_scene.py"]
+
+  basewalker_train:
+    <<: *gpu
+    image: carbonpoly/basewalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/train.py"]
+
+  basewalker_infer:
+    <<: *gpu
+    image: carbonpoly/basewalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/infer.py"]
+
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:
     image: carbonpoly/prep

@@ -70,6 +70,15 @@ function Invoke-Sat($kind, $src) {
 function Exp2 { Invoke-Sat "raw"    "chunk_local.laz";        Log "Rendering exp2"; Invoke-Stage "sat_render_raw" }
 function Exp4 { Invoke-Sat "masked" "chunk_masked_local.laz"; Log "Rendering exp4"; Invoke-Stage "sat_render_masked" }
 
+# BaseWalker (tree-base detection; separate study track)
+function BwBuild { Log "Building basewalker image"
+    Invoke-Docker ($Compose + @("build", "sonata"))
+    Invoke-Docker ($Compose + @("build", "basewalker_prep")) }
+function BwPrep  { Log "BaseWalker - scene prep"; Invoke-Stage "basewalker_prep" }
+function BwTrain { Log "BaseWalker - training";   Invoke-Stage "basewalker_train" }
+function BwInfer { Log "BaseWalker - inference";  Invoke-Stage "basewalker_infer" }
+function Basewalker { BwBuild; BwPrep; BwTrain; BwInfer }
+
 # exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
 # compiled for sm_60-86 and cannot run on Blackwell (RTX 50xx). The exp2/exp4
 # targets still work when invoked explicitly (on compatible hardware).
@@ -93,6 +102,10 @@ switch ($Target) {
     "exp2"   { Exp2 }
     "exp3"   { Exp3 }
     "exp4"   { Exp4 }
+    "basewalker" { Basewalker }
+    "bw_prep"  { BwBuild; BwPrep }
+    "bw_train" { BwTrain }
+    "bw_infer" { BwInfer }
     default  {
         Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4]"
         exit 2
