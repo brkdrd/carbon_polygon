@@ -281,6 +281,17 @@ def rollout(model, dec, scene, dem, seeds, bases, n_steps=N_STEPS, r=SPHERE_R,
     confs = []
     step_norms = []
     tbptt = int(os.environ.get("BW_TBPTT", "2"))  # detach the chain every N steps
+
+    # Reachability mask, fixed at seed time. A walker whose nearest base is
+    # beyond what n_steps of radius-r movement can cross cannot reach it, and a
+    # sphere of ground points carries no hint of which way to go — so its
+    # distance term is unlearnable noise that dominates the loss magnitude and
+    # makes the reported number track batch composition instead of skill.
+    # Such walkers still train the CONFIDENCE head (as true negatives).
+    reach = None
+    if bases is not None:
+        reach_m = float(os.environ.get("BW_REACH_M", str(1.5 * n_steps * r)))
+        reach = (torch.cdist(seeds, bases).min(dim=1).values <= reach_m).float()
     for k in range(n_steps + 1):
         feats, coords = encode_spheres(model, scene, c, r)
         tok_feat, tok_rel, gate, mask = pad_tokens(feats, coords, c, r)
@@ -320,13 +331,19 @@ def rollout(model, dec, scene, dem, seeds, bases, n_steps=N_STEPS, r=SPHERE_R,
             hub = float(os.environ.get("BW_HUBER_M", "2.0"))
             h = torch.where(d_new <= hub, d_new ** 2,
                             2.0 * hub * d_new - hub * hub)
-            dist_terms.append(w_dist * h.mean())
+            # mean over REACHABLE walkers only, so the value is comparable
+            # across batches regardless of how many far seeds were drawn
+            dist_terms.append(w_dist * (h * reach).sum() / reach.sum().clamp_min(1))
         if not train:
             c = c.detach()
     loss = None
-    if bases is not None:
-        loss = torch.stack(dist_terms).sum() + torch.stack(conf_terms).sum()
     info = dict(step=torch.stack(step_norms).mean().item() if step_norms else 0.0)
+    if bases is not None:
+        l_dist = torch.stack(dist_terms).sum()
+        l_conf = torch.stack(conf_terms).sum()
+        loss = l_dist + l_conf
+        info.update(dist=l_dist.item(), conf=l_conf.item(),
+                    n_reach=int(reach.sum().item()), n=len(seeds))
     return loss, c, confs[-1], info
 
 

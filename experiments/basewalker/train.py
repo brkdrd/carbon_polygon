@@ -94,11 +94,12 @@ def main():
                 d_end = torch.cdist(c_end, bases_t).min(1).values
             n_near = int(BATCH * NEAR_FRAC)  # sample_batch puts near seeds first
             d_near_end = d_end[:n_near]
-            print(f"[bw-train] it {it:5d} | loss {loss.item():9.3f} | "
+            print(f"[bw-train] it {it:5d} | dist {info['dist']:7.2f} "
+                  f"conf {info['conf']:5.2f} | "
                   f"near end-dist {d_near_end.median().item():5.2f} m | "
                   f"near hit@{W.CONF_R} "
                   f"{(d_near_end < W.CONF_R).float().mean().item()*100:4.1f}% | "
-                  f"all median {d_end.median().item():6.2f} m | "
+                  f"reach {info['n_reach']}/{info['n']} | "
                   f"|step| {info['step']:5.2f} m | grad {gnorm:7.2f} | "
                   f"{(time.time()-t0)/it:.2f} s/it", flush=True)
 
