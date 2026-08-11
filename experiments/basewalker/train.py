@@ -26,7 +26,8 @@ CKPT = C.MODELS / "basewalker_decoder.pth"
 
 ITERS = int(os.environ.get("BW_ITERS", "3000"))
 BATCH = int(os.environ.get("BW_BATCH", "48"))
-LR = float(os.environ.get("BW_LR", "1e-3"))
+LR = float(os.environ.get("BW_LR", "3e-4"))
+CLIP = float(os.environ.get("BW_CLIP", "1.0"))
 EVAL_EVERY = int(os.environ.get("BW_EVAL_EVERY", "500"))
 EVAL_SEEDS = int(os.environ.get("BW_EVAL_SEEDS", "2048"))
 NEAR_FRAC = float(os.environ.get("BW_NEAR_FRAC", "0.7"))
@@ -80,10 +81,11 @@ def main():
     C.MODELS.mkdir(parents=True, exist_ok=True)
     for it in range(1, ITERS + 1):
         dec.train()
-        loss, c_end, _ = W.rollout(model, dec, scene, dem, sample_batch(), bases_t)
+        loss, c_end, _, info = W.rollout(model, dec, scene, dem, sample_batch(),
+                                         bases_t)
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(dec.parameters(), 5.0)
+        gnorm = torch.nn.utils.clip_grad_norm_(dec.parameters(), CLIP)
         opt.step()
         sched.step()
 
@@ -96,7 +98,8 @@ def main():
                   f"near end-dist {d_near_end.median().item():5.2f} m | "
                   f"near hit@{W.CONF_R} "
                   f"{(d_near_end < W.CONF_R).float().mean().item()*100:4.1f}% | "
-                  f"all median {d_end.median().item():5.2f} m | "
+                  f"all median {d_end.median().item():6.2f} m | "
+                  f"|step| {info['step']:5.2f} m | grad {gnorm:7.2f} | "
                   f"{(time.time()-t0)/it:.2f} s/it", flush=True)
 
         if it % EVAL_EVERY == 0 or it == ITERS:

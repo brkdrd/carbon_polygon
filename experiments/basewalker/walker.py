@@ -120,8 +120,16 @@ class Dem:
                 + z10 * (1 - du) * dv + z11 * du * dv)
 
     def project(self, c: torch.Tensor) -> torch.Tensor:
-        """Drop centers (B,3) onto the cloth: z := dem(x, y)."""
-        return torch.cat([c[:, :2], self.height(c[:, :2])[:, None]], dim=1)
+        """Drop centers (B,3) onto the cloth: z := dem(x, y).
+
+        The height VALUE is used (so 3D distances stay honest) but its gradient
+        w.r.t. xy is cut: the cloth is a step function at building edges, where
+        d(z)/d(xy) reaches ~6 m/m, and that derivative — multiplied along the
+        8-step chain — dominated everything and blew training up. Walkers ride
+        the ground either way, so z carries no direction signal worth its
+        gradient.
+        """
+        return torch.cat([c[:, :2], self.height(c[:, :2]).detach()[:, None]], dim=1)
 
 
 # ---------------------------------------------------------------------------
@@ -271,10 +279,18 @@ def rollout(model, dec, scene, dem, seeds, bases, n_steps=N_STEPS, r=SPHERE_R,
     c = seeds.clone()
     conf_terms, dist_terms = [], []
     confs = []
+    step_norms = []
+    tbptt = int(os.environ.get("BW_TBPTT", "2"))  # detach the chain every N steps
     for k in range(n_steps + 1):
         feats, coords = encode_spheres(model, scene, c, r)
         tok_feat, tok_rel, gate, mask = pad_tokens(feats, coords, c, r)
         delta, conf = dec(tok_feat, tok_rel, gate, mask)
+        # A walker whose sphere is empty has NO information about where a base
+        # is; letting the decoder emit its constant "empty" offset every step
+        # produced a fixed drift vector that compounded into 100 m+ escapes.
+        # No information -> no movement.
+        has_tokens = mask[:, 1:].any(dim=1).float()[:, None]
+        delta = delta * has_tokens
         confs.append(conf)
         if bases is not None:
             d_now = torch.cdist(c, bases).min(dim=1).values
@@ -286,7 +302,14 @@ def rollout(model, dec, scene, dem, seeds, bases, n_steps=N_STEPS, r=SPHERE_R,
                 conf, flag, pos_weight=pos_w))
         if k == n_steps:
             break
+        step_norms.append(delta.detach().norm(dim=-1).mean())
         c = dem.project(c + delta)
+        # Bound the through-time recurrence: the Jacobian dc_{k+1}/dc_k can have
+        # norm > 1, so an 8-long product explodes. Truncating every BW_TBPTT
+        # steps keeps the local through-time credit (which the membership gate
+        # makes meaningful) while capping the multiplicative blow-up.
+        if train and tbptt > 0 and (k + 1) % tbptt == 0:
+            c = c.detach().requires_grad_(False)
         if bases is not None:
             d_new = torch.cdist(c, bases).min(dim=1).values
             w_dist = GAMMA ** (n_steps - 1 - k)
@@ -303,7 +326,8 @@ def rollout(model, dec, scene, dem, seeds, bases, n_steps=N_STEPS, r=SPHERE_R,
     loss = None
     if bases is not None:
         loss = torch.stack(dist_terms).sum() + torch.stack(conf_terms).sum()
-    return loss, c, confs[-1]
+    info = dict(step=torch.stack(step_norms).mean().item() if step_norms else 0.0)
+    return loss, c, confs[-1], info
 
 
 # ---------------------------------------------------------------------------
@@ -351,8 +375,8 @@ def detect(model, dec, scene, dem, seeds_np, batch=256, n_steps=N_STEPS,
     ends, scores = [], []
     for s in range(0, len(seeds_np), batch):
         seeds = torch.from_numpy(seeds_np[s:s + batch].astype(np.float32)).to(device)
-        _, c, conf = rollout(model, dec, scene, dem, seeds, bases=None,
-                             n_steps=n_steps, r=r, train=False)
+        _, c, conf, _ = rollout(model, dec, scene, dem, seeds, bases=None,
+                                n_steps=n_steps, r=r, train=False)
         ends.append(c.cpu().numpy())
         scores.append(torch.sigmoid(conf).cpu().numpy())
     return np.concatenate(ends), np.concatenate(scores)
