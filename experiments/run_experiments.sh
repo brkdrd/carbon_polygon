@@ -73,6 +73,9 @@ case "${1:-all}" in
   sonata) sonata ;;
   exp1) exp1 ;; exp2) exp2 ;; exp3) exp3 ;; exp4) exp4 ;;
   basewalker) basewalker ;;
-  bw_prep) bw_build; bw_prep ;; bw_train) bw_train ;; bw_infer) bw_infer ;;
+  bw_build) bw_build ;;
+  bw_prep) bw_build; bw_prep ;;
+  bw_train) bw_build; bw_train ;;
+  bw_infer) bw_build; bw_infer ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4]"; exit 2 ;;
 esac

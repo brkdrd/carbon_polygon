@@ -103,9 +103,10 @@ switch ($Target) {
     "exp3"   { Exp3 }
     "exp4"   { Exp4 }
     "basewalker" { Basewalker }
+    "bw_build" { BwBuild }
     "bw_prep"  { BwBuild; BwPrep }
-    "bw_train" { BwTrain }
-    "bw_infer" { BwInfer }
+    "bw_train" { BwBuild; BwTrain }
+    "bw_infer" { BwBuild; BwInfer }
     default  {
         Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4]"
         exit 2
