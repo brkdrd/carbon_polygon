@@ -90,9 +90,13 @@ def main():
         if it % 50 == 0 or it == 1:
             with torch.no_grad():
                 d_end = torch.cdist(c_end, bases_t).min(1).values
+            n_near = int(BATCH * NEAR_FRAC)  # sample_batch puts near seeds first
+            d_near_end = d_end[:n_near]
             print(f"[bw-train] it {it:5d} | loss {loss.item():9.3f} | "
-                  f"median end-dist {d_end.median().item():5.2f} m | "
-                  f"hit@{W.CONF_R} {(d_end < W.CONF_R).float().mean().item()*100:4.1f}% | "
+                  f"near end-dist {d_near_end.median().item():5.2f} m | "
+                  f"near hit@{W.CONF_R} "
+                  f"{(d_near_end < W.CONF_R).float().mean().item()*100:4.1f}% | "
+                  f"all median {d_end.median().item():5.2f} m | "
                   f"{(time.time()-t0)/it:.2f} s/it", flush=True)
 
         if it % EVAL_EVERY == 0 or it == ITERS:

@@ -290,7 +290,14 @@ def rollout(model, dec, scene, dem, seeds, bases, n_steps=N_STEPS, r=SPHERE_R,
         if bases is not None:
             d_new = torch.cdist(c, bases).min(dim=1).values
             w_dist = GAMMA ** (n_steps - 1 - k)
-            dist_terms.append(w_dist * (d_new ** 2).mean())
+            # Huber: quadratic within BW_HUBER_M, linear beyond. Raw d**2 let
+            # far walkers (gradient ~2d) drown out near ones and grow the loss
+            # once walkers start moving; a 2 m sphere holds no direction info
+            # at 80 m anyway, so far gradients deserve bounded magnitude.
+            hub = float(os.environ.get("BW_HUBER_M", "2.0"))
+            h = torch.where(d_new <= hub, d_new ** 2,
+                            2.0 * hub * d_new - hub * hub)
+            dist_terms.append(w_dist * h.mean())
         if not train:
             c = c.detach()
     loss = None
