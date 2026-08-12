@@ -189,11 +189,25 @@ walker endpoints after NMS; metrics are P/R/F1 vs the held-out val block.
 ./run_experiments.sh bw_prep    # scene tiles + normals + DEM + labels + seeds
 ./run_experiments.sh bw_train   # trains the walker decoder (GPU, ~hours)
 ./run_experiments.sh bw_infer   # detections + metrics + results image
+./run_experiments.sh bw_render  # 4 chunk images: detections vs ground truth
 ```
+
+`bw_render` cuts four 40 m chunks out of the full map and draws, per chunk, the
+cloud (with the 0.3–3 m trunk slab highlighted), the RTK bases and the model's
+detections coloured TP / FP / missed, plus per-chunk P/R/F1. Chunks are the
+densest non-overlapping windows, **two from the held-out val block and two from
+the train block**, so the same picture shows both regimes — each panel says
+which block it came from. Outputs `results/11_basewalker_chunks.png` (2×2
+overview), `results/11_basewalker_chunk{1..4}.png`,
+`basewalker_chunk_metrics.json` and `basewalker_chunk_detections.csv`.
 
 Knobs (env): `BW_SPHERE_R` (2 m), `BW_STEPS` (8), `BW_GAMMA` (0.85),
 `BW_CONF_R` (0.5 m), `BW_NMS_R` (0.5 m), `BW_ITERS`, `BW_BATCH`,
 `BW_UTM_EPSG` (32652), `BW_DEM_METHOD` (csf|percentile).
+Render-only: `BW_CHUNK_M` (40 m), `BW_N_CHUNKS` (4), `BW_CHUNK_SPLIT`
+(`mix`|`val`|`train`), `BW_CHUNK_MIN_GT` (5), `BW_CONF_THRESH` (the
+checkpoint's best-F1 threshold), and `BW_CHUNKS="cx,cy;cx,cy;..."` to place the
+chunks by hand in local coordinates.
 
 ## Notes & caveats
 

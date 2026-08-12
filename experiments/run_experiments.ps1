@@ -10,6 +10,8 @@
     .\run_experiments.ps1 sonata     # Sonata vegetation mask
     .\run_experiments.ps1 exp1       # a single experiment (exp1..exp4;
                                      # exp2/exp4 need a non-Blackwell GPU)
+    .\run_experiments.ps1 bw_render  # BaseWalker: 4 chunk images, detections
+                                     # vs ground truth (needs a trained model)
 
   If PowerShell blocks the script, launch it as:
     powershell -ExecutionPolicy Bypass -File .\run_experiments.ps1
@@ -77,7 +79,8 @@ function BwBuild { Log "Building basewalker image"
 function BwPrep  { Log "BaseWalker - scene prep"; Invoke-Stage "basewalker_prep" }
 function BwTrain { Log "BaseWalker - training";   Invoke-Stage "basewalker_train" }
 function BwInfer { Log "BaseWalker - inference";  Invoke-Stage "basewalker_infer" }
-function Basewalker { BwBuild; BwPrep; BwTrain; BwInfer }
+function BwRender { Log "BaseWalker - chunk renders vs ground truth"; Invoke-Stage "basewalker_render" }
+function Basewalker { BwBuild; BwPrep; BwTrain; BwInfer; BwRender }
 
 # exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
 # compiled for sm_60-86 and cannot run on Blackwell (RTX 50xx). The exp2/exp4
@@ -107,8 +110,9 @@ switch ($Target) {
     "bw_prep"  { BwBuild; BwPrep }
     "bw_train" { BwBuild; BwTrain }
     "bw_infer" { BwBuild; BwInfer }
+    "bw_render" { BwBuild; BwRender }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render]"
         exit 2
     }
 }

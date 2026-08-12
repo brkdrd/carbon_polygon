@@ -112,6 +112,15 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/infer.py"]
 
+  # qualitative renders: detections vs RTK ground truth on four map chunks
+  basewalker_render:
+    <<: *gpu
+    image: carbonpoly/basewalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/render_chunks.py"]
+
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:
     image: carbonpoly/prep

@@ -17,6 +17,7 @@ COPY basewalker/prep_scene.py /app/prep_scene.py
 COPY basewalker/walker.py /app/walker.py
 COPY basewalker/train.py /app/train.py
 COPY basewalker/infer.py /app/infer.py
+COPY basewalker/render_chunks.py /app/render_chunks.py
 
 WORKDIR /app
-CMD ["bash", "-lc", "python /app/prep_scene.py && python /app/train.py && python /app/infer.py"]
+CMD ["bash", "-lc", "python /app/prep_scene.py && python /app/train.py && python /app/infer.py && python /app/render_chunks.py"]

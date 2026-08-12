@@ -6,6 +6,8 @@
 #   ./run_experiments.sh prep       # just build the shared chunk
 #   ./run_experiments.sh exp1|exp2|exp3|exp4   # a single experiment (deps must
 #                                   # exist; exp2/exp4 need a non-Blackwell GPU)
+#   ./run_experiments.sh bw_render  # BaseWalker: 4 chunk images, detections
+#                                   # vs ground truth (needs a trained model)
 #
 # Requires: Docker + Compose, an NVIDIA GPU with the Container Toolkit, and
 # Kaggle credentials in .env (KAGGLE_USERNAME / KAGGLE_KEY).
@@ -51,7 +53,8 @@ bw_build() { log "Building basewalker image"; $DC build sonata; $DC build basewa
 bw_prep()  { log "BaseWalker — scene prep";   $RUN basewalker_prep; }
 bw_train() { log "BaseWalker — training";     $RUN basewalker_train; }
 bw_infer() { log "BaseWalker — inference";    $RUN basewalker_infer; }
-basewalker() { bw_build; bw_prep; bw_train; bw_infer; }
+bw_render() { log "BaseWalker — chunk renders vs ground truth"; $RUN basewalker_render; }
+basewalker() { bw_build; bw_prep; bw_train; bw_infer; bw_render; }
 
 # exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
 # compiled for sm_60-86 and cannot run on Blackwell (RTX 50xx). The exp2/exp4
@@ -77,5 +80,6 @@ case "${1:-all}" in
   bw_prep) bw_build; bw_prep ;;
   bw_train) bw_build; bw_train ;;
   bw_infer) bw_build; bw_infer ;;
-  *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4]"; exit 2 ;;
+  bw_render) bw_build; bw_render ;;
+  *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render]"; exit 2 ;;
 esac

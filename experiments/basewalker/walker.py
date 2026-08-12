@@ -360,29 +360,42 @@ def nms(points: np.ndarray, scores: np.ndarray, radius: float = NMS_R):
     return np.array(kept, dtype=np.int64)
 
 
+def match_pairs(pred_xyz, pred_score, gt_xyz, radius):
+    """Greedy confidence-ordered matching, one GT per detection.
+
+    Returns (pairs, fp_idx, fn_idx): pairs is (K,2) of [pred_i, gt_j], fp_idx
+    indexes unmatched detections, fn_idx indexes unmatched GT bases.
+    """
+    used = np.zeros(len(gt_xyz), bool)
+    hit = np.zeros(len(pred_xyz), bool)
+    pairs = []
+    for i in np.argsort(-pred_score):
+        if used.all():          # also covers the no-GT case
+            break
+        d = np.linalg.norm(gt_xyz - pred_xyz[i][None, :], axis=1)
+        d[used] = np.inf
+        j = int(np.argmin(d))
+        if d[j] <= radius:
+            used[j] = hit[i] = True
+            pairs.append((i, j))
+    return (np.array(pairs, np.int64).reshape(-1, 2),
+            np.flatnonzero(~hit), np.flatnonzero(~used))
+
+
 def match_metrics(pred_xyz, pred_score, gt_xyz, radius):
     """Greedy confidence-ordered matching. Returns dict with P/R/F1/RMSE."""
     if len(pred_xyz) == 0:
         return dict(tp=0, fp=0, fn=len(gt_xyz), precision=0.0, recall=0.0,
                     f1=0.0, rmse=float("nan"))
-    used = np.zeros(len(gt_xyz), bool)
-    order = np.argsort(-pred_score)
-    tp, errs = 0, []
-    for i in order:
-        d = np.linalg.norm(gt_xyz - pred_xyz[i][None, :], axis=1)
-        d[used] = np.inf
-        j = int(np.argmin(d))
-        if d[j] <= radius:
-            used[j] = True
-            tp += 1
-            errs.append(d[j])
-    fp = len(pred_xyz) - tp
-    fn = int((~used).sum())
+    pairs, fp_i, fn_i = match_pairs(pred_xyz, pred_score, gt_xyz, radius)
+    tp, fp, fn = len(pairs), len(fp_i), len(fn_i)
+    errs = (np.linalg.norm(pred_xyz[pairs[:, 0]] - gt_xyz[pairs[:, 1]], axis=1)
+            if tp else np.zeros(0))
     prec = tp / max(tp + fp, 1)
     rec = tp / max(tp + fn, 1)
     f1 = 2 * prec * rec / max(prec + rec, 1e-9)
     return dict(tp=tp, fp=fp, fn=fn, precision=prec, recall=rec, f1=f1,
-                rmse=float(np.sqrt(np.mean(np.square(errs)))) if errs else float("nan"))
+                rmse=float(np.sqrt(np.mean(np.square(errs)))) if tp else float("nan"))
 
 
 @torch.no_grad()
