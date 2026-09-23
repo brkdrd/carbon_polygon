@@ -102,6 +102,7 @@ function GwBuild { Log "Building geowalker image"
     Invoke-Docker ($Compose + @("build", "geowalker_field")) }
 function GwField { BwPrep; Log "GeoWalker - geodesic distance field"; Invoke-Stage "geowalker_field" }
 function GwTest  { Log "GeoWalker - CPU self-check (no GPU, no data)"; Invoke-Stage "geowalker_test" }
+function GpuCheck { Log "GPU preflight - does the card reach a container?"; Invoke-Stage "gpu_check" }
 function GwTrain { Log "GeoWalker - training";  Invoke-Stage "geowalker_train" }
 function GwInfer { Log "GeoWalker - inference"; Invoke-Stage "geowalker_infer" }
 function Geowalker { GwBuild; GwTest; GwField; GwTrain; GwInfer }
@@ -138,11 +139,12 @@ switch ($Target) {
     "geowalker" { Geowalker }
     "gw_build" { GwBuild }
     "gw_test" { GwBuild; GwTest }
+    "gpu_check" { GwBuild; GpuCheck }
     "gw_field" { GwBuild; GwField }
     "gw_train" { GwBuild; GwTrain }
     "gw_infer" { GwBuild; GwInfer }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gw_field|gw_train|gw_infer]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer]"
         exit 2
     }
 }

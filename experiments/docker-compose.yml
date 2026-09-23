@@ -133,6 +133,15 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/geowalker/geodesic.py"]
 
+  # GPU preflight, ~5 s: proves the card reaches a container AND that kernels
+  # actually run on it (on sm_120 the availability flag alone can lie).
+  gpu_check:
+    <<: *gpu
+    image: carbonpoly/geowalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    command: ["bash", "-lc", "nvidia-smi; echo; python /app/geowalker/gpu_check.py"]
+
   # CPU self-check: synthetic geometry only, no data, no GPU, ~10 s
   geowalker_test:
     image: carbonpoly/geowalker

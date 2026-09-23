@@ -76,6 +76,7 @@ basewalker() { bw_build; bw_prep; bw_train; bw_infer; bw_render; }
 gw_build() { log "Building geowalker image"; $DC build sonata; $DC build basewalker_prep; $DC build geowalker_field; }
 gw_field() { bw_prep; log "GeoWalker — geodesic distance field"; $RUN geowalker_field; }
 gw_test()  { log "GeoWalker — CPU self-check (no GPU, no data)"; $RUN geowalker_test; }
+gpu_check() { log "GPU preflight — does the card reach a container?"; $RUN gpu_check; }
 gw_train() { log "GeoWalker — training";  $RUN geowalker_train; }
 gw_infer() { log "GeoWalker — inference"; $RUN geowalker_infer; }
 geowalker() { gw_build; gw_test; gw_field; gw_train; gw_infer; }
@@ -108,10 +109,11 @@ case "${1:-all}" in
   geowalker) geowalker ;;
   gw_build) gw_build ;;
   gw_test) gw_build; gw_test ;;
+  gpu_check) gw_build; gpu_check ;;
   gw_field) gw_build; gw_field ;;
   gw_train) gw_build; gw_train ;;
   gw_infer) gw_build; gw_infer ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
-geowalker|gw_test|gw_field|gw_train|gw_infer]"; exit 2 ;;
+geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer]"; exit 2 ;;
 esac

@@ -260,6 +260,7 @@ One stage at a time (same target names in both launchers):
 | target | what it does | needs |
 |--------|--------------|-------|
 | `gw_test` | CPU self-check on synthetic geometry | nothing, ~10 s |
+| `gpu_check` | proves the GPU reaches a container **and that kernels run** | GPU, ~5 s |
 | `gw_field` | the through-cloud distance field | CPU, RAM-bound |
 | `gw_train` | train the decoder by simulated walking | GPU, hours |
 | `gw_infer` | detections + metrics + figures | GPU, ~minutes |
@@ -288,6 +289,18 @@ docker compose run --rm --no-deps geowalker_infer
 
 (Going that route, copy `.env.example` to `.env` first — the launchers do that
 for you, and compose errors out without it.)
+
+**The CPU stages print an NVIDIA warning — that is expected.** `bw_prep`,
+`gw_field` and `gw_test` deliberately reserve no GPU (the field is scipy
+Dijkstra, not CUDA), so the CUDA base image's entrypoint prints *"The NVIDIA
+Driver was not detected"* on startup. It is cosmetic and those stages run fine.
+Only `gw_train` and `gw_infer` request the card; run `gpu_check` to confirm they
+will get it before committing to the long stages.
+
+On an RTX 50xx (Blackwell, sm_120), `torch.cuda.is_available()` alone is not
+proof: a torch built only to sm_90 enumerates the device and then dies on the
+first kernel. `gpu_check` launches a real matmul, which is why it is worth the
+five seconds.
 
 Nothing else is needed on a fresh machine: `.env` is created from `.env.example`
 if absent (both launchers do this; Compose v2 handles the CRLF a Windows
