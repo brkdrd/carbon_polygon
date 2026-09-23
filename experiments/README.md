@@ -230,23 +230,41 @@ plain transformer decoder that answers one question per step: *given this small
 sphere of points (and the last few I walked through), which single point should
 I move to?*
 
+**Windows (PowerShell)** — the usual case for the GPU box:
+
+```powershell
+git pull
+cd experiments
+.\run_experiments.ps1 geowalker   # build + self-check + field + train + infer
+```
+
+**Linux / WSL2:**
+
 ```bash
 git pull
 cd experiments
-./run_experiments.sh geowalker   # build + self-check + field + train + infer
+./run_experiments.sh geowalker    # identical sequence
 ```
 
-or one stage at a time:
+One stage at a time (same target names in both launchers):
 
-```bash
-./run_experiments.sh gw_test    # CPU self-check: no GPU, no data, ~10 s
-./run_experiments.sh gw_field   # the through-cloud distance field (CPU, RAM-bound)
-./run_experiments.sh gw_train   # train the decoder by simulated walking (GPU, hours)
-./run_experiments.sh gw_infer   # detections + metrics + figures (GPU, ~minutes)
+| target | what it does | needs |
+|--------|--------------|-------|
+| `gw_test` | CPU self-check on synthetic geometry | nothing, ~10 s |
+| `gw_field` | the through-cloud distance field | CPU, RAM-bound |
+| `gw_train` | train the decoder by simulated walking | GPU, hours |
+| `gw_infer` | detections + metrics + figures | GPU, ~minutes |
+
+```powershell
+.\run_experiments.ps1 gw_test     # …or gw_field | gw_train | gw_infer
 ```
+
+If PowerShell blocks the script:
+`powershell -ExecutionPolicy Bypass -File .\run_experiments.ps1 geowalker`
 
 Nothing else is needed on a fresh machine: `.env` is created from `.env.example`
-if absent, the images build in dependency order (`sonata` → `basewalker` →
+if absent (both launchers do this; Compose v2 handles the CRLF a Windows
+checkout gives it), the images build in dependency order (`sonata` → `basewalker` →
 `geowalker`), and every stage is idempotent — `gw_field` skips an existing
 `field.npz`, `bw_prep` skips existing tiles, and `gw_train` resumes from the
 checkpoint. A re-run after an interruption picks up where it stopped.
