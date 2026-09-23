@@ -12,6 +12,8 @@
                                      # exp2/exp4 need a non-Blackwell GPU)
     .\run_experiments.ps1 bw_render  # BaseWalker: 4 chunk images, detections
                                      # vs ground truth (needs a trained model)
+    .\run_experiments.ps1 geowalker  # GeoWalker: through-cloud distance field,
+                                     # then train + infer the walker on it
 
   If PowerShell blocks the script, launch it as:
     powershell -ExecutionPolicy Bypass -File .\run_experiments.ps1
@@ -24,6 +26,16 @@ param([string]$Target = "all")
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+
+# compose declares `env_file: [.env]` on most services and errors out if it is
+# missing - which is exactly the state of a fresh `git clone`. Seed it from the
+# example so `git pull` then a run just works; the Kaggle credentials only
+# matter for the very first prep on a machine with no cloud in data\raw\ yet.
+if (-not (Test-Path ".env")) {
+    Copy-Item ".env.example" ".env"
+    Write-Host "!! no .env found - created one from .env.example." -ForegroundColor Yellow
+    Write-Host "   Fill in KAGGLE_USERNAME / KAGGLE_KEY if data\raw\ has no .laz yet."
+}
 
 # docker-compose does the heavy lifting; this file only sequences the stages.
 $Compose = @("compose", "-f", "docker-compose.yml")
@@ -82,6 +94,18 @@ function BwInfer { Log "BaseWalker - inference";  Invoke-Stage "basewalker_infer
 function BwRender { Log "BaseWalker - chunk renders vs ground truth"; Invoke-Stage "basewalker_render" }
 function Basewalker { BwBuild; BwPrep; BwTrain; BwInfer; BwRender }
 
+# GeoWalker (walks a through-cloud distance field; separate study track).
+# Reuses BaseWalker's scene artifacts, so GwField runs BwPrep first (idempotent).
+function GwBuild { Log "Building geowalker image"
+    Invoke-Docker ($Compose + @("build", "sonata"))
+    Invoke-Docker ($Compose + @("build", "basewalker_prep"))
+    Invoke-Docker ($Compose + @("build", "geowalker_field")) }
+function GwField { BwPrep; Log "GeoWalker - geodesic distance field"; Invoke-Stage "geowalker_field" }
+function GwTest  { Log "GeoWalker - CPU self-check (no GPU, no data)"; Invoke-Stage "geowalker_test" }
+function GwTrain { Log "GeoWalker - training";  Invoke-Stage "geowalker_train" }
+function GwInfer { Log "GeoWalker - inference"; Invoke-Stage "geowalker_infer" }
+function Geowalker { GwBuild; GwTest; GwField; GwTrain; GwInfer }
+
 # exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
 # compiled for sm_60-86 and cannot run on Blackwell (RTX 50xx). The exp2/exp4
 # targets still work when invoked explicitly (on compatible hardware).
@@ -111,8 +135,14 @@ switch ($Target) {
     "bw_train" { BwBuild; BwTrain }
     "bw_infer" { BwBuild; BwInfer }
     "bw_render" { BwBuild; BwRender }
+    "geowalker" { Geowalker }
+    "gw_build" { GwBuild }
+    "gw_test" { GwBuild; GwTest }
+    "gw_field" { GwBuild; GwField }
+    "gw_train" { GwBuild; GwTrain }
+    "gw_infer" { GwBuild; GwInfer }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gw_field|gw_train|gw_infer]"
         exit 2
     }
 }

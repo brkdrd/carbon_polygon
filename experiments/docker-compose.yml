@@ -121,6 +121,42 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/render_chunks.py"]
 
+  # ---- GeoWalker: walking a through-cloud distance field (own track) ----
+  # Image builds FROM carbonpoly/basewalker (which builds FROM carbonpoly/sonata)
+  # and reuses its scene artifacts in data/basewalker/. The field stage is pure
+  # numpy/scipy, so it needs no GPU; train/infer do.
+  geowalker_field:
+    build: { context: ., dockerfile: geowalker/Dockerfile }
+    image: carbonpoly/geowalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/geowalker/geodesic.py"]
+
+  # CPU self-check: synthetic geometry only, no data, no GPU, ~10 s
+  geowalker_test:
+    image: carbonpoly/geowalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/tests/test_geowalker.py"]
+
+  geowalker_train:
+    <<: *gpu
+    image: carbonpoly/geowalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/geowalker/train.py"]
+
+  geowalker_infer:
+    <<: *gpu
+    image: carbonpoly/geowalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/geowalker/infer.py"]
+
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:
     image: carbonpoly/prep

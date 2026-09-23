@@ -8,11 +8,26 @@
 #                                   # exist; exp2/exp4 need a non-Blackwell GPU)
 #   ./run_experiments.sh bw_render  # BaseWalker: 4 chunk images, detections
 #                                   # vs ground truth (needs a trained model)
+#   ./run_experiments.sh geowalker  # GeoWalker: through-cloud distance field,
+#                                   # then train + infer the walker on it
+#                                   # (gw_test | gw_field | gw_train | gw_infer
+#                                   # singly; gw_test is a CPU-only self-check)
 #
 # Requires: Docker + Compose, an NVIDIA GPU with the Container Toolkit, and
 # Kaggle credentials in .env (KAGGLE_USERNAME / KAGGLE_KEY).
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# compose declares `env_file: [.env]` on most services and errors out if it is
+# missing — which is exactly the state of a fresh `git clone`. Seed it from the
+# example so `git pull && ./run_experiments.sh <target>` just works; the Kaggle
+# credentials only matter for the very first prep on a machine with no cloud in
+# data/raw/ yet.
+if [[ ! -f .env ]]; then
+  cp .env.example .env
+  printf '\033[1;33m!! no .env found — created one from .env.example.\033[0m\n'
+  printf '   Fill in KAGGLE_USERNAME / KAGGLE_KEY if data/raw/ has no .laz yet.\n'
+fi
 
 DC="docker compose -f docker-compose.yml"
 # --no-deps: this script sequences every stage itself, so a `run` must not
@@ -56,6 +71,15 @@ bw_infer() { log "BaseWalker — inference";    $RUN basewalker_infer; }
 bw_render() { log "BaseWalker — chunk renders vs ground truth"; $RUN basewalker_render; }
 basewalker() { bw_build; bw_prep; bw_train; bw_infer; bw_render; }
 
+# GeoWalker (walks a through-cloud distance field; separate study track).
+# Reuses BaseWalker's scene artifacts, so gw_field runs bw_prep first (idempotent).
+gw_build() { log "Building geowalker image"; $DC build sonata; $DC build basewalker_prep; $DC build geowalker_field; }
+gw_field() { bw_prep; log "GeoWalker — geodesic distance field"; $RUN geowalker_field; }
+gw_test()  { log "GeoWalker — CPU self-check (no GPU, no data)"; $RUN geowalker_test; }
+gw_train() { log "GeoWalker — training";  $RUN geowalker_train; }
+gw_infer() { log "GeoWalker — inference"; $RUN geowalker_infer; }
+geowalker() { gw_build; gw_test; gw_field; gw_train; gw_infer; }
+
 # exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
 # compiled for sm_60-86 and cannot run on Blackwell (RTX 50xx). The exp2/exp4
 # targets still work when invoked explicitly (on compatible hardware).
@@ -81,5 +105,13 @@ case "${1:-all}" in
   bw_train) bw_build; bw_train ;;
   bw_infer) bw_build; bw_infer ;;
   bw_render) bw_build; bw_render ;;
-  *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render]"; exit 2 ;;
+  geowalker) geowalker ;;
+  gw_build) gw_build ;;
+  gw_test) gw_build; gw_test ;;
+  gw_field) gw_build; gw_field ;;
+  gw_train) gw_build; gw_train ;;
+  gw_infer) gw_build; gw_infer ;;
+  *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
+basewalker|bw_prep|bw_train|bw_infer|bw_render|\
+geowalker|gw_test|gw_field|gw_train|gw_infer]"; exit 2 ;;
 esac

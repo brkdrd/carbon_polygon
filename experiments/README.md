@@ -221,6 +221,150 @@ Render-only: `BW_CHUNK_M` (40 m), `BW_N_CHUNKS` (4), `BW_CHUNK_SPLIT`
 checkpoint's best-F1 threshold), and `BW_CHUNKS="cx,cy;cx,cy;..."` to place the
 chunks by hand in local coordinates.
 
+## GeoWalker (walking a through-cloud distance field — separate study track)
+
+A second, simpler take on tree-base detection. Same frozen Sonata encoder, same
+scene, but the supervision is a **distance field computed through the point
+cloud** instead of the straight line to the nearest label, and the model is a
+plain transformer decoder that answers one question per step: *given this small
+sphere of points (and the last few I walked through), which single point should
+I move to?*
+
+```bash
+git pull
+cd experiments
+./run_experiments.sh geowalker   # build + self-check + field + train + infer
+```
+
+or one stage at a time:
+
+```bash
+./run_experiments.sh gw_test    # CPU self-check: no GPU, no data, ~10 s
+./run_experiments.sh gw_field   # the through-cloud distance field (CPU, RAM-bound)
+./run_experiments.sh gw_train   # train the decoder by simulated walking (GPU, hours)
+./run_experiments.sh gw_infer   # detections + metrics + figures (GPU, ~minutes)
+```
+
+Nothing else is needed on a fresh machine: `.env` is created from `.env.example`
+if absent, the images build in dependency order (`sonata` → `basewalker` →
+`geowalker`), and every stage is idempotent — `gw_field` skips an existing
+`field.npz`, `bw_prep` skips existing tiles, and `gw_train` resumes from the
+checkpoint. A re-run after an interruption picks up where it stopped.
+
+`gw_test` is worth running first on any new machine: it exercises the field
+maths and the loss gradients on synthetic geometry in about ten seconds, so a
+broken environment surfaces before you commit hours of GPU time. It is also the
+first thing `geowalker` runs.
+
+`gw_field` runs the BaseWalker scene prep first (it is idempotent), because both
+tracks share exactly the same scene: `data/basewalker/tiles/`, `dem.npz`,
+`labels.npz`, `seeds.npz`, one local frame, one spatial train/val split.
+
+### Stage A — the field (`geowalker/geodesic.py`)
+
+For every point, the distance to the nearest RTK tree base **measured along the
+cloud, never through air**: start with the bases as the reached set, repeatedly
+absorb the closest not-yet-reached point and carry its edge length along. That
+is Dijkstra with the frontier in a heap, so it is one `scipy.sparse.csgraph`
+call over a kNN graph whose edges are capped at `GW_MAX_EDGE` metres.
+
+* The result is always ≥ the straight-line distance (a path through the cloud
+  cannot be shorter than the chord) — checked and reported on every build, and
+  regression-tested in `tests/test_geowalker.py`.
+* Points with no path at all (an island across 5 m of air) stay at `+inf` and
+  are simply excluded from the loss, not clamped to a lie.
+* Resolution: the graph is built on a `GW_VOXEL` (0.25 m) occupancy grid, not on
+  the raw 0.05 m cloud — the campus is ~1.5·10⁹ raw points and a kNN graph on
+  even its 0.05 m subsample does not fit in RAM. Nodes are voxel centres; edge
+  weights are true 3D distances. If the node count would exceed `GW_MAX_NODES`
+  the voxel is coarsened automatically rather than dying half way through.
+* Two fields are written: `g_train` (seeded on train bases only — the one the
+  loss reads) and `g_all` (for figures and diagnostics). Training supervision
+  therefore never sees a val base.
+
+Output: `data/geowalker/field.npz`, `field_meta.json` and
+`results/20_geowalker_field.png` — the field from above, its distribution, and a
+vertical slice showing it run down the trunks to the ground.
+
+### Stage B — the walker (`geowalker/model.py`, `train.py`)
+
+Per step: the sphere of radius `GW_SPHERE_R` around the current center is encoded
+once by the **frozen** Sonata encoder into coarse tokens. The decoder cross-
+attends from a single learned query over those tokens **plus the tokens of the
+previous `GW_MEM` (3) spheres** — the dynamics context, so it knows where it came
+from — and emits the next point, as a displacement capped at `GW_MAX_STEP`.
+Every token, memory included, is re-expressed relative to the *current* center
+and gated by `relu(1 - |rel| / R_ctx)`, which is what carries gradient back to
+the center even though the encoder itself never sees one.
+
+Each simulated step is scored by two terms, both differentiable in the predicted
+point (the point *set* is a detached lookup; the distances to it are not):
+
+| term | what it is | why |
+|------|------------|-----|
+| `l_geo` | Gaussian-weighted (σ = `GW_GEO_SIGMA`) mean **field value** of the cloud around the new center | its gradient is a mean-shift toward the better-connected side; its minimum is the base itself. Linearised past `GW_HUBER_M` so a walker 40 m out cannot drown one that is 1 m out |
+| `l_dens` | mean distance to the `GW_DENS_K` nearest lidar points, hinged at `GW_DENS_D0` | "is there actually structure here" — free along a trunk, expensive in open air. This is the term that keeps the walker attached to the cloud |
+
+A third, **detached** read-out term trains the decoder to also report `log1p` of
+the field value at its current position. It cannot steer the walk (the target is
+detached) and it needs no extra labels — it exists so an endpoint can be scored
+at inference, where no field exists: `score = exp(-ĝ / GW_SCORE_TAU)`, so 1 means
+"I am standing on a tree base". Detections are endpoints after NMS + threshold,
+matched greedily against the held-out val bases, exactly as BaseWalker scores.
+
+Walkers whose seed is further than `GW_REACH_M` through the cloud are excluded
+from `l_geo` only: a 2 m sphere carries no hint of direction at 40 m, so that
+term would be unlearnable noise setting the loss magnitude. They still train the
+density term and the read-out (as true negatives). Same lesson as BaseWalker;
+so are the step-norm cap and the `GW_TBPTT` truncation, which is what keeps the
+8-step Jacobian product from exploding.
+
+`gw_train` **resumes** on the same contract as `bw_train`: an existing
+`data/models/geowalker_decoder.pth` is loaded with its AdamW state and best val
+F1, `GW_ITERS` (9000) more iterations run on a fresh cosine cycle from
+`GW_RESUME_LR`, and the checkpoint only ever holds the best-val-F1 decoder
+(`geowalker_decoder_last.pth` always holds the final one). `GW_RESUME=0` starts
+cold.
+
+### Stage C — inference (`geowalker/infer.py`)
+
+No field is used: the model only ever sees the sphere around itself and its last
+3 spheres. Writes `results/geowalker_detections.csv`,
+`geowalker_metrics.json`, `results/21_geowalker_detections.png` and
+`results/22_geowalker_walks.png` — the actual walks drawn on top of the field
+they were trained to descend, which is the fastest way to see whether the thing
+learned to walk or learned to stand still.
+
+### Knobs (env)
+
+Field: `GW_VOXEL` (0.25 m), `GW_KNN` (16), `GW_MAX_EDGE` (2×voxel),
+`GW_BASE_R` (0.5 m), `GW_MAX_NODES` (12e6), `FORCE_GW_FIELD`.
+Walker: `GW_SPHERE_R` (2 m), `GW_STEPS` (8), `GW_MEM` (3), `GW_MAX_STEP` (1 m),
+`GW_GAMMA` (0.85), `GW_FIELD_R` (2 m), `GW_GEO_SIGMA` (0.4 m), `GW_HUBER_M` (2 m),
+`GW_DENS_K` (12), `GW_DENS_D0` (0.5 m), `GW_W_DENS` (2.0), `GW_W_AUX` (0.5),
+`GW_REACH_M` (12 m), `GW_TBPTT` (2), `GW_DEM_PROJECT` (0 — set 1 to make the
+walker ride the ground instead of moving freely in 3D), `GW_SCORE_TAU` (0.5),
+`GW_NMS_R` (0.5 m).
+Train: `GW_ITERS` (9000, per run), `GW_BATCH` (48), `GW_LR`, `GW_EVAL_EVERY`,
+`GW_NEAR_FRAC` (0.7), `GW_NEAR_R`, `GW_RESUME` (1), `GW_SEED`.
+Infer: `GW_INFER_REGION` (`val`|`all`), `GW_CONF_THRESH`, `GW_WALK_WIN` (40 m).
+
+### How it differs from BaseWalker
+
+Both walk a frozen-Sonata sphere toward a tree base; the difference is what
+"closer" means and what the model remembers.
+
+| | BaseWalker | GeoWalker |
+|---|---|---|
+| target | straight-line distance to the nearest base | distance **through the cloud** to the nearest base |
+| loss | Huber on that distance + BCE "base within 0.5 m" | field mean around the new point + a point-density penalty |
+| context | the current sphere only | the current sphere **+ the previous 3** |
+| step | unbounded offset, projected onto the DEM | norm-capped, free in 3D by default |
+| confidence | a supervised binary head | a read-out of the predicted field value |
+
+They share the scene, the split and the metric, so their numbers are directly
+comparable — `10_/11_` images are BaseWalker's, `20_/21_/22_` are GeoWalker's.
+
 ## Notes & caveats
 
 - **"Trees + bushes" — combined training sources.** The vegetation head is
@@ -268,7 +412,8 @@ experiments/
   sonata/                   # vegetation head train + mask, Dockerfile
   treelearn/                # TreeLearn wrapper, Dockerfile
   segmentanytree/           # SAT output renderer (SAT itself is the official image)
-  tests/                    # float32-fix regression test (CPU, no GPU needed)
+  geowalker/                # through-cloud distance field + the walker on it
+  tests/                    # float32-fix + GeoWalker regression tests (CPU)
   data/                     # runtime volume (git-ignored artifacts)
   results/                  # output PNGs
 ```
