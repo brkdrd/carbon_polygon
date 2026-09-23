@@ -230,13 +230,22 @@ plain transformer decoder that answers one question per step: *given this small
 sphere of points (and the last few I walked through), which single point should
 I move to?*
 
-**Windows (PowerShell)** — the usual case for the GPU box:
+**Windows** — the usual case for the GPU box:
 
-```powershell
+```bat
 git pull
 cd experiments
-.\run_experiments.ps1 geowalker   # build + self-check + field + train + infer
+run_experiments.cmd geowalker     :: build + self-check + field + train + infer
 ```
+
+Use the `.cmd` wrapper, not the `.ps1` directly. A stock Windows client ships
+with `ExecutionPolicy=Restricted` and refuses to run the PowerShell script at
+all (*"running scripts is disabled on this system"* / *"выполнение сценариев
+отключено в этой системе"*). Batch files are exempt from that policy, so the
+wrapper launches the same script with a **per-process** bypass — it changes
+nothing about the machine. Calling the `.ps1` yourself works too if your policy
+already allows it, or via
+`powershell -ExecutionPolicy Bypass -File .\run_experiments.ps1 geowalker`.
 
 **Linux / WSL2:**
 
@@ -255,12 +264,30 @@ One stage at a time (same target names in both launchers):
 | `gw_train` | train the decoder by simulated walking | GPU, hours |
 | `gw_infer` | detections + metrics + figures | GPU, ~minutes |
 
-```powershell
-.\run_experiments.ps1 gw_test     # …or gw_field | gw_train | gw_infer
+```bat
+run_experiments.cmd gw_test       :: ...or gw_field | gw_train | gw_infer
 ```
 
-If PowerShell blocks the script:
-`powershell -ExecutionPolicy Bypass -File .\run_experiments.ps1 geowalker`
+If you would rather not use a wrapper at all, the stages are plain compose
+services — this is exactly what the launchers run:
+
+```bat
+:: three separate builds, in this order: the images chain via FROM
+:: (geowalker <- basewalker <- sonata) and compose only understands
+:: depends_on, so one combined build call can order them wrong.
+docker compose build sonata
+docker compose build basewalker_prep
+docker compose build geowalker_field
+
+docker compose run --rm --no-deps geowalker_test
+docker compose run --rm --no-deps basewalker_prep
+docker compose run --rm --no-deps geowalker_field
+docker compose run --rm --no-deps geowalker_train
+docker compose run --rm --no-deps geowalker_infer
+```
+
+(Going that route, copy `.env.example` to `.env` first — the launchers do that
+for you, and compose errors out without it.)
 
 Nothing else is needed on a fresh machine: `.env` is created from `.env.example`
 if absent (both launchers do this; Compose v2 handles the CRLF a Windows
