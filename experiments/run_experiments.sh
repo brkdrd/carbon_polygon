@@ -79,6 +79,7 @@ gw_test()  { log "GeoWalker — CPU self-check (no GPU, no data)"; $RUN geowalke
 gpu_check() { log "GPU preflight — does the card reach a container?"; $RUN gpu_check; }
 gw_train() { log "GeoWalker — training";  $RUN geowalker_train; }
 gw_infer() { log "GeoWalker — inference"; $RUN geowalker_infer; }
+gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
 geowalker() { gw_build; gw_test; gw_field; gw_train; gw_infer; }
 
 # exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
@@ -113,7 +114,8 @@ case "${1:-all}" in
   gw_field) gw_build; gw_field ;;
   gw_train) gw_build; gw_train ;;
   gw_infer) gw_build; gw_infer ;;
+  gw_diag) gw_build; gw_diag ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
-geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer]"; exit 2 ;;
+geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_diag]"; exit 2 ;;
 esac

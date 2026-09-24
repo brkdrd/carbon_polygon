@@ -16,6 +16,7 @@ COPY geowalker/model.py /app/geowalker/model.py
 COPY geowalker/train.py /app/geowalker/train.py
 COPY geowalker/infer.py /app/geowalker/infer.py
 COPY geowalker/gpu_check.py /app/geowalker/gpu_check.py
+COPY geowalker/diagnose.py /app/geowalker/diagnose.py
 # CPU regression tests, so a freshly pulled machine can verify the field maths
 # and the loss gradients (seconds, no GPU) before committing hours to training.
 COPY tests/test_geowalker.py /app/tests/test_geowalker.py

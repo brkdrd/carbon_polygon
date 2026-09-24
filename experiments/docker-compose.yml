@@ -166,6 +166,15 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/geowalker/infer.py"]
 
+  # why is recall what it is? decomposes it into walking / NMS / threshold
+  geowalker_diag:
+    <<: *gpu
+    image: carbonpoly/geowalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/geowalker/diagnose.py"]
+
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:
     image: carbonpoly/prep

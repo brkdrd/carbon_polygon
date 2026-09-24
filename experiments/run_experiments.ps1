@@ -105,6 +105,7 @@ function GwTest  { Log "GeoWalker - CPU self-check (no GPU, no data)"; Invoke-St
 function GpuCheck { Log "GPU preflight - does the card reach a container?"; Invoke-Stage "gpu_check" }
 function GwTrain { Log "GeoWalker - training";  Invoke-Stage "geowalker_train" }
 function GwInfer { Log "GeoWalker - inference"; Invoke-Stage "geowalker_infer" }
+function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function Geowalker { GwBuild; GwTest; GwField; GwTrain; GwInfer }
 
 # exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
@@ -143,8 +144,9 @@ switch ($Target) {
     "gw_field" { GwBuild; GwField }
     "gw_train" { GwBuild; GwTrain }
     "gw_infer" { GwBuild; GwInfer }
+    "gw_diag" { GwBuild; GwDiag }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_diag]"
         exit 2
     }
 }
