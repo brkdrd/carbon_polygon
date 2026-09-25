@@ -6,3 +6,10 @@ Dockerfile  text eol=lf
 *.yml       text eol=lf
 *.ps1       text eol=crlf
 *.cmd       text eol=crlf
+
+# Result artifacts are binary. Git usually detects that, but a Windows checkout
+# with core.autocrlf=true corrupts any image it misdetects as text — silently,
+# and the file only fails to open at the other end. Say it explicitly.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary

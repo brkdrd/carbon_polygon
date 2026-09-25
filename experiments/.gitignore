@@ -11,3 +11,10 @@ data/models/
 data/treelearn/
 data/sat/
 !data/.gitkeep
+
+# Result images and metrics ARE meant to be committed — that is the only way a
+# run on the GPU box gets shared. Negated explicitly rather than just left
+# unlisted: a user-level core.excludesFile containing *.png is common on
+# Windows, and a repo .gitignore outranks it, so this forces them through.
+!results/
+!results/**
