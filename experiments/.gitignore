@@ -4,12 +4,11 @@ __pycache__/
 
 # runtime volumes — keep the dirs, ignore their contents (large point clouds,
 # weights, and SAT staging folders). Result PNGs under results/ ARE tracked.
-data/raw/
-data/cache/
-data/chunk/
-data/models/
-data/treelearn/
-data/sat/
+# Catch-all, not a list: this WAS an enumeration of subfolders, and it silently
+# stopped covering the scene once the walker stages started writing
+# data/basewalker, data/geowalker and data/tiles — tens of GB of point cloud one
+# `git add -A` away from the repo. A catch-all cannot fall behind the pipeline.
+data/*
 !data/.gitkeep
 
 # Result images and metrics ARE meant to be committed — that is the only way a
