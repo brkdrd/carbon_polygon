@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 
 # runtime volumes — keep the dirs, ignore their contents (large point clouds,
-# weights, and SAT staging folders).
+# weights, and SAT staging folders). Result PNGs under results/ ARE tracked.
 data/raw/
 data/cache/
 data/chunk/
@@ -12,8 +12,9 @@ data/treelearn/
 data/sat/
 !data/.gitkeep
 
-# Run outputs stay OUT of git: they are large, binary, and regenerate on every
-# run. The directory itself is kept so the compose bind mount has somewhere to
-# land. (Supersedes the earlier "result PNGs ARE tracked" rule above.)
-results/*
-!results/.gitkeep
+# Result images and metrics ARE meant to be committed — that is the only way a
+# run on the GPU box gets shared. Negated explicitly rather than just left
+# unlisted: a user-level core.excludesFile containing *.png is common on
+# Windows, and a repo .gitignore outranks it, so this forces them through.
+!results/
+!results/**
