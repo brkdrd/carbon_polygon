@@ -256,10 +256,19 @@ def render(nodes, g_all, bases, v, out):
     # cut through a few trees shows dark (near) at ground level and brighter up.
     ax = fig.add_subplot(gs[1, 1])
     if len(bases):
+        # Slice the FULL node set, then subsample — slicing the already
+        # subsampled 600k leaves a few thousand points in a 3 m slab and the
+        # panel comes out nearly empty.
         y0 = float(np.median(bases[:, 1]))
-        m = np.abs(p[:, 1] - y0) < 1.5
-        x0 = float(np.median(p[m, 0])) if m.any() else 0.0
-        m &= np.abs(p[:, 0] - x0) < 25
+        m_all = np.abs(nodes[:, 1] - y0) < 1.5
+        x0 = float(np.median(nodes[m_all, 0])) if m_all.any() else 0.0
+        m_all &= np.abs(nodes[:, 0] - x0) < 25
+        sl = np.flatnonzero(m_all)
+        if len(sl) > 300_000:
+            sl = rng.choice(sl, 300_000, replace=False)
+        p, gv = nodes[sl], g_all[sl]
+        fin = np.isfinite(gv)
+        m = np.ones(len(p), bool)
         ax.scatter(p[m & ~fin, 0], p[m & ~fin, 2], s=1.2, c="0.85", marker=".",
                    linewidths=0)
         mm = m & fin

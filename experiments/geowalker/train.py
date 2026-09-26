@@ -49,14 +49,24 @@ ITERS = int(os.environ.get("GW_ITERS", "9000"))       # THIS run, not cumulative
 BATCH = int(os.environ.get("GW_BATCH", "48"))
 LR = float(os.environ.get("GW_LR", "3e-4"))
 CLIP = float(os.environ.get("GW_CLIP", "1.0"))
-EVAL_EVERY = int(os.environ.get("GW_EVAL_EVERY", "500"))
-EVAL_SEEDS = int(os.environ.get("GW_EVAL_SEEDS", "2048"))
+# Evaluating on every val seed costs a few minutes, so halve the frequency to
+# keep the total eval overhead where it was (~8% of a 9000-iter run) while the
+# number it reports becomes directly comparable to what gw_infer produces.
+EVAL_EVERY = int(os.environ.get("GW_EVAL_EVERY", "1000"))
+# Eval seeds. 2048 of 22k val seeds (9%) made the reported F1 sampling noise:
+# with a tenth of the walkers, most bases simply had nobody near them, so recall
+# read ~0.29 while the same checkpoint scored 0.60 over the full set. 0 = use
+# every val seed, which is the only setting whose F1 means what it says.
+EVAL_SEEDS = int(os.environ.get("GW_EVAL_SEEDS", "0"))
 NEAR_FRAC = float(os.environ.get("GW_NEAR_FRAC", "0.7"))
 NEAR_R = float(os.environ.get("GW_NEAR_R", str(M.N_STEPS * M.MAX_STEP)))
 SEED_JIT = float(os.environ.get("GW_SEED_JIT", "1.0"))
 RESUME = os.environ.get("GW_RESUME", "1") != "0"
 RESUME_LR = float(os.environ.get("GW_RESUME_LR", str(LR)))
 SEED = int(os.environ.get("GW_SEED", "0"))
+# radius a detection must land within to count. NMS_R is a separate knob;
+# conflating them silently changed the metric whenever NMS was retuned.
+MATCH_R = float(os.environ.get("GW_MATCH_R", "0.5"))
 
 # geometry the checkpoint is only valid under — warned about on a resume
 GEOM = dict(sphere_r=M.SPHERE_R, n_steps=M.N_STEPS, mem=M.MEM,
@@ -78,15 +88,36 @@ def seed_field_value(field, seeds):
     return g
 
 
-def evaluate(dec, enc, scene, dem, va_seeds, val_bases, n=EVAL_SEEDS):
-    """Full detection eval on the val block: walk -> NMS -> best threshold."""
-    sub = va_seeds[np.random.permutation(len(va_seeds))[:n]]
+def eval_subset(va_seeds):
+    """The FIXED set of val seeds every eval uses.
+
+    Re-drawing it each time (as this did) reshuffles which bases have a walker
+    nearby, so consecutive evals differ by more than real progress does — the
+    first run's F1 wandered 0.344-0.367 over 2000 iterations with no trend, and
+    checkpoint selection was picking noise. One subset, chosen once.
+    """
+    if EVAL_SEEDS and len(va_seeds) > EVAL_SEEDS:
+        idx = np.random.RandomState(12345).permutation(len(va_seeds))[:EVAL_SEEDS]
+        print(f"[gw-train] eval on a FIXED {EVAL_SEEDS:,} of {len(va_seeds):,} "
+              f"val seeds ({EVAL_SEEDS/len(va_seeds)*100:.0f}%) — recall is "
+              f"understated at this density; GW_EVAL_SEEDS=0 uses them all")
+        return va_seeds[idx]
+    print(f"[gw-train] eval on ALL {len(va_seeds):,} val seeds")
+    return va_seeds
+
+
+def evaluate(dec, enc, scene, dem, sub, val_bases, match_r=MATCH_R):
+    """Detection eval on the val block: walk -> NMS -> best threshold.
+
+    The cut is swept over score QUANTILES, not a fixed 0.05-0.95 grid: the head
+    saturates near 0.55, so most of that grid was dead range.
+    """
     ends, scores = M.detect(dec, enc, scene, dem, sub.astype(np.float32))
     keep = M.nms(ends, scores, radius=M.NMS_R)
-    best = dict(f1=-1.0, thresh=0.5)
-    for thr in np.linspace(0.05, 0.95, 19):
+    best = dict(f1=-1.0, thresh=0.0)
+    for thr in M.sweep_thresholds(scores[keep]):
         k = keep[scores[keep] >= thr]
-        m = M.match_metrics(ends[k], scores[k], val_bases, radius=M.NMS_R)
+        m = M.match_metrics(ends[k], scores[k], val_bases, radius=match_r)
         if m["f1"] > best["f1"]:
             best = dict(m, thresh=float(thr))
     return best
@@ -164,6 +195,7 @@ def main():
         seeds = torch.from_numpy(s.astype(np.float32)).to(dev)
         return dem.project(seeds).detach()      # start on the ground, like infer
 
+    eval_sub = eval_subset(va_seeds)
     t0, it_end, last_val = time.time(), it0 + ITERS, {}
     C.MODELS.mkdir(parents=True, exist_ok=True)
     GW.mkdir(parents=True, exist_ok=True)
@@ -187,8 +219,8 @@ def main():
 
         if it % EVAL_EVERY == 0 or it == it_end:
             dec.eval()
-            best = evaluate(dec, enc, scene, dem, va_seeds, val_bases)
-            print(f"[gw-train] EVAL it {it}: F1@{M.NMS_R} {best['f1']:.3f} "
+            best = evaluate(dec, enc, scene, dem, eval_sub, val_bases)
+            print(f"[gw-train] EVAL it {it}: F1@{MATCH_R} {best['f1']:.3f} "
                   f"(P {best['precision']:.3f} R {best['recall']:.3f} "
                   f"thr {best['thresh']:.2f} rmse {best['rmse']:.2f} m)", flush=True)
             last_val = best

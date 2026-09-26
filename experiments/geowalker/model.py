@@ -400,6 +400,62 @@ def clamp_step(delta, max_step=MAX_STEP):
 
 
 # ---------------------------------------------------------------------------
+# scoring helpers
+# ---------------------------------------------------------------------------
+def sweep_thresholds(scores, n=25):
+    """Candidate score cuts, taken as QUANTILES of the actual scores.
+
+    A fixed linspace(0.05, 0.95) is wrong for this head: score = exp(-g/tau) and
+    g has a floor (the cloud around even a perfect endpoint still has non-zero
+    field value), so scores saturate well below 1 — the observed maximum on the
+    first full run was 0.544, leaving eight of nineteen sweep points in dead
+    range and only ~11 resolving the part that matters. Quantiles put every
+    candidate where detections actually are, at any density.
+    """
+    if len(scores) == 0:
+        return np.array([0.5])
+    q = np.unique(np.quantile(scores, np.linspace(0.0, 0.98, n)))
+    return np.concatenate([[max(q[0] - 1e-6, 0.0)], q])
+
+
+def surveyed_mask(gt_xy, cell=10.0, dilate=2):
+    """Where the RTK survey actually went, as an occupancy grid test.
+
+    The stem map does not cover the whole scanned scene. prep_scene already
+    drops labels with no cloud beneath them, but there is no converse filter, so
+    a REAL tree the surveyors never walked to is scored as a false positive. The
+    first full run shows exactly that: chains of detections along the periphery
+    and a dense cluster in the north-east, in areas holding no ground truth at
+    all. Scoring those as errors measures the survey's extent, not the model.
+
+    Returns inside(points_xy) -> bool. Cells holding a base, dilated by `dilate`
+    cells, count as surveyed; everything else is unjudgeable.
+    """
+    from scipy.ndimage import binary_dilation
+
+    pad = cell * (dilate + 1)
+    x0, y0 = gt_xy[:, 0].min() - pad, gt_xy[:, 1].min() - pad
+    nx = int((gt_xy[:, 0].max() - x0 + pad) / cell) + 1
+    ny = int((gt_xy[:, 1].max() - y0 + pad) / cell) + 1
+    occ = np.zeros((ny, nx), bool)
+    occ[((gt_xy[:, 1] - y0) / cell).astype(int),
+        ((gt_xy[:, 0] - x0) / cell).astype(int)] = True
+    occ = binary_dilation(occ, iterations=dilate)
+
+    def inside(xy):
+        if len(xy) == 0:
+            return np.zeros(0, bool)
+        ix = np.floor((xy[:, 0] - x0) / cell).astype(int)
+        iy = np.floor((xy[:, 1] - y0) / cell).astype(int)
+        ok = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+        out = np.zeros(len(xy), bool)
+        out[ok] = occ[iy[ok], ix[ok]]
+        return out
+
+    return inside
+
+
+# ---------------------------------------------------------------------------
 # rollout
 # ---------------------------------------------------------------------------
 def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,

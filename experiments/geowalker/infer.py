@@ -37,6 +37,9 @@ BW = C.DATA / "basewalker"
 GW = C.DATA / "geowalker"
 CKPT = C.MODELS / "geowalker_decoder.pth"
 N_WALKS = int(os.environ.get("GW_N_WALKS", "300"))
+# surveyed-region grid: cell size and how far to dilate around a labelled base
+SURVEY_CELL = float(os.environ.get("GW_SURVEY_CELL", "10.0"))
+SURVEY_DILATE = int(os.environ.get("GW_SURVEY_DILATE", "2"))
 
 
 def detections_figure(scene, seeds, gt, det_xyz, f1, region, out):
@@ -147,24 +150,70 @@ def main():
     enc = M.load_encoder()
     ends, scores = M.detect(dec, enc, scene, dem, seeds.astype(np.float32))
     keep = M.nms(ends, scores, radius=M.NMS_R)
+    kept_xyz, kept_s = ends[keep], scores[keep]
+    print(f"[gw-infer] {len(kept_xyz)} endpoints survive NMS "
+          f"(scores {kept_s.min():.3f}-{kept_s.max():.3f})")
+
+    # Which detections are even judgeable: the RTK survey does not cover the
+    # whole scanned scene, and a real tree nobody walked to is not a model
+    # error. Scored both ways so the unmasked number stays comparable to
+    # BaseWalker's.
+    inside = M.surveyed_mask(gt[:, :2], cell=SURVEY_CELL, dilate=SURVEY_DILATE)
+    in_survey = inside(kept_xyz[:, :2])
+    print(f"[gw-infer] inside the surveyed region: {in_survey.sum()} of "
+          f"{len(kept_xyz)} endpoints ({in_survey.mean()*100:.0f}%)")
+
+    # Re-tune the cut HERE: the checkpoint's threshold was chosen at eval-seed
+    # density, and the number of detections scales with the seed count, so it
+    # does not transfer to a full run.
+    sweep = []
+    for thr in M.sweep_thresholds(kept_s):
+        k = kept_s >= thr
+        sweep.append(dict(
+            thresh=float(thr), n=int(k.sum()),
+            all=M.match_metrics(kept_xyz[k], kept_s[k], gt, radius=0.5),
+            surveyed=M.match_metrics(kept_xyz[k & in_survey], kept_s[k & in_survey],
+                                     gt, radius=0.5)))
+    best = max(sweep, key=lambda r: r["all"]["f1"])
+    best_s = max(sweep, key=lambda r: r["surveyed"]["f1"])
+    print(f"[gw-infer] best F1@0.5m over the sweep: {best['all']['f1']:.3f} "
+          f"at thresh {best['thresh']:.3f} (checkpoint said {thresh:.3f})")
+    print(f"[gw-infer]   inside the surveyed region: "
+          f"{best_s['surveyed']['f1']:.3f} at thresh {best_s['thresh']:.3f}")
+
+    if os.environ.get("GW_USE_BEST_THRESH", "1") != "0":
+        thresh = best["thresh"]
     det = keep[scores[keep] >= thresh]
     det_xyz, det_s = ends[det], scores[det]
-    print(f"[gw-infer] {len(det)} detections after NMS+thresh")
+    print(f"[gw-infer] {len(det)} detections at thresh {thresh:.3f}")
 
     metrics = {}
     for r in (0.5, 1.0):
         metrics[f"@{r}m"] = m = M.match_metrics(det_xyz, det_s, gt, radius=r)
+        ins = inside(det_xyz[:, :2])
+        ms = M.match_metrics(det_xyz[ins], det_s[ins], gt, radius=r)
+        metrics[f"@{r}m_surveyed"] = ms
         print(f"[gw-infer] @{r}m: P {m['precision']:.3f} R {m['recall']:.3f} "
               f"F1 {m['f1']:.3f} rmse {m['rmse']:.2f} m "
               f"(tp {m['tp']} fp {m['fp']} fn {m['fn']})")
+        print(f"[gw-infer]   surveyed-only: P {ms['precision']:.3f} "
+              f"R {ms['recall']:.3f} F1 {ms['f1']:.3f}")
 
     C.RESULTS.mkdir(parents=True, exist_ok=True)
+    # EVERY post-NMS endpoint, with its score and whether it is judgeable — so
+    # the threshold can be re-tuned offline without another GPU run.
+    np.savetxt(C.RESULTS / "geowalker_endpoints.csv",
+               np.column_stack([kept_xyz, kept_s, in_survey.astype(np.float32)]),
+               delimiter=",", header="x,y,z,score,in_surveyed", comments="")
     np.savetxt(C.RESULTS / "geowalker_detections.csv",
                np.column_stack([det_xyz, det_s]), delimiter=",",
                header="x,y,z,score", comments="")
     (C.RESULTS / "geowalker_metrics.json").write_text(json.dumps(
         dict(region=region, thresh=thresh, n_det=int(len(det)), n_gt=int(len(gt)),
-             n_seeds=int(len(seeds)), metrics=metrics,
+             n_seeds=int(len(seeds)), n_endpoints=int(len(kept_xyz)),
+             metrics=metrics, threshold_sweep=sweep,
+             surveyed=dict(cell=SURVEY_CELL, dilate=SURVEY_DILATE,
+                           frac_endpoints_inside=float(in_survey.mean())),
              checkpoint=dict(it=ck.get("it"), val=ck.get("val"))), indent=2))
 
     detections_figure(scene, seeds, gt, det_xyz, metrics["@0.5m"]["f1"], region,

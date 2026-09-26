@@ -254,6 +254,47 @@ def test_rollout_backpropagates_through_the_whole_walk():
     assert info["n_empty"] == 0 and info["step"] > 0
 
 
+def test_threshold_sweep_tracks_the_actual_score_range():
+    """The head saturates well below 1 (0.544 on the first full run), so a fixed
+    0.05-0.95 grid wastes half its points. Quantiles must follow the data."""
+    sc = np.random.default_rng(0).uniform(0.10, 0.54, 5000)
+    thr = M.sweep_thresholds(sc, n=25)
+    assert thr[0] <= sc.min(), "lowest cut must keep everything"
+    assert thr.max() <= sc.max(), "no cut above the highest score (dead range)"
+    assert (np.diff(thr) >= 0).all(), "must be sorted"
+    # the cuts should spread across the populated range, not bunch at one end
+    spread = np.quantile(thr, 0.75) - np.quantile(thr, 0.25)
+    assert spread > 0.1 * (sc.max() - sc.min()), spread
+
+
+def test_threshold_sweep_survives_degenerate_input():
+    assert len(M.sweep_thresholds(np.zeros(0))) >= 1          # no detections
+    assert len(M.sweep_thresholds(np.full(50, 0.3))) >= 1     # all identical
+
+
+def test_surveyed_mask_excludes_unlabelled_ground():
+    """Detections in areas the RTK survey never reached are not model errors.
+    The mask must cover the labelled block (plus a margin) and nothing else."""
+    gt = np.stack(np.meshgrid(np.arange(0, 50, 5.0),
+                              np.arange(0, 50, 5.0)), -1).reshape(-1, 2)
+    inside = M.surveyed_mask(gt, cell=10.0, dilate=2)
+    assert inside(np.array([[25.0, 25.0]]))[0]          # middle of the survey
+    assert inside(np.array([[0.0, 0.0]]))[0]            # a corner base
+    assert inside(np.array([[-15.0, 25.0]]))[0]         # just outside, dilated
+    assert not inside(np.array([[300.0, 300.0]]))[0]    # far periphery
+    assert not inside(np.array([[25.0, -200.0]]))[0]
+    assert inside(np.zeros((0, 2))).shape == (0,)       # empty input
+
+
+def test_surveyed_mask_keeps_every_ground_truth_base():
+    """A base must never fall outside its own survey mask, or recall would be
+    computed against bases the precision term is forbidden to match."""
+    rng = np.random.default_rng(1)
+    gt = rng.uniform(-100, 100, (500, 2))
+    inside = M.surveyed_mask(gt, cell=10.0, dilate=2)
+    assert inside(gt).all()
+
+
 def test_score_is_monotone_in_predicted_distance():
     g = torch.tensor([0.0, 0.5, 2.0, 10.0])
     s = torch.exp(-torch.expm1(g).clamp_min(0.0) / M.SCORE_TAU)
