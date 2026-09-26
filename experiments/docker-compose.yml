@@ -175,6 +175,15 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/geowalker/diagnose.py"]
 
+  # canopy height: derives the annotators' height cut from the labels and says
+  # how many detections stand under something too short to have been one (CPU)
+  geowalker_height:
+    image: carbonpoly/geowalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/geowalker/height.py"]
+
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:
     image: carbonpoly/prep
