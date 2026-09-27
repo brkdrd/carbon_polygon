@@ -184,6 +184,17 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/geowalker/height.py"]
 
+  # can a dedicated head tell a stem from a bush? mines the walker's own false
+  # positives as hard negatives, trains the binary decision, re-scores the real
+  # val endpoints with it and reports whether that clears the bar
+  geowalker_head:
+    <<: *gpu
+    image: carbonpoly/geowalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/geowalker/treehead.py"]
+
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:
     image: carbonpoly/prep

@@ -81,6 +81,7 @@ gw_train() { log "GeoWalker — training";  $RUN geowalker_train; }
 gw_infer() { log "GeoWalker — inference"; $RUN geowalker_infer; }
 gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
 gw_height() { log "GeoWalker — canopy height vs the label criterion"; $RUN geowalker_height; }
+gw_head()  { log "GeoWalker — can the tree/not-tree head be trained?"; $RUN geowalker_head; }
 geowalker() { gw_build; gw_test; gw_field; gw_train; gw_infer; }
 
 # exp2/exp4 (SegmentAnyTree) are OFF the default path: its official images are
@@ -117,7 +118,8 @@ case "${1:-all}" in
   gw_infer) gw_build; gw_infer ;;
   gw_diag) gw_build; gw_diag ;;
   gw_height) gw_build; gw_height ;;
+  gw_head) gw_build; gw_head ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
-geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_diag|gw_height]"; exit 2 ;;
+geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_diag|gw_height|gw_head]"; exit 2 ;;
 esac

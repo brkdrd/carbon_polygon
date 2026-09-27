@@ -295,6 +295,41 @@ def test_surveyed_mask_keeps_every_ground_truth_base():
     assert inside(gt).all()
 
 
+def test_tree_head_runs_and_separates_a_trivial_case():
+    """The head must consume a padded sphere batch and produce one logit each,
+    and be able to learn ANY signal — if it cannot fit a toy separation the
+    experiment's negative result would be meaningless."""
+    import treehead as TH
+
+    torch.manual_seed(0)
+    head = TH.TreeHead(blocks=1)
+    B, T = 8, 6
+    tf = torch.randn(B, T, 512)
+    rel = torch.randn(B, T, 3) * 0.5
+    gate = torch.rand(B, T)
+    mask = torch.ones(B, T, dtype=torch.bool)
+    out = head(tf, rel, gate, mask)
+    assert out.shape == (B,) and torch.isfinite(out).all()
+
+    # a separable toy problem: positives carry a constant offset in the tokens
+    y = torch.tensor([1.0, 0.0] * (B // 2))
+    tf2 = tf + y[:, None, None] * 3.0
+    opt = torch.optim.Adam(head.parameters(), lr=3e-3)
+    for _ in range(120):
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            head(tf2, rel, gate, mask), y)
+        opt.zero_grad(); loss.backward(); opt.step()
+    pred = (torch.sigmoid(head(tf2, rel, gate, mask)) > 0.5).float()
+    assert (pred == y).all(), (pred, y)
+
+
+def test_tree_head_dataset_bands_are_disjoint():
+    """Positives and hard negatives must not overlap, or the head is trained on
+    contradictory labels for the same geometry."""
+    import treehead as TH
+    assert TH.POS_R < TH.NEG_R, (TH.POS_R, TH.NEG_R)
+
+
 def test_score_is_monotone_in_predicted_distance():
     g = torch.tensor([0.0, 0.5, 2.0, 10.0])
     s = torch.exp(-torch.expm1(g).clamp_min(0.0) / M.SCORE_TAU)
