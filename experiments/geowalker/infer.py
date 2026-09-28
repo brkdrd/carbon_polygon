@@ -148,7 +148,8 @@ def main():
     print(f"[gw-infer] region={region}: {len(seeds):,} seeds | {len(gt)} GT bases")
 
     enc = M.load_encoder()
-    ends, scores = M.detect(dec, enc, scene, dem, seeds.astype(np.float32))
+    ends, scores = M.detect(dec, enc, scene, dem, seeds.astype(np.float32),
+                            label="infer")
     keep = M.nms(ends, scores, radius=M.NMS_R)
     kept_xyz, kept_s = ends[keep], scores[keep]
     print(f"[gw-infer] {len(kept_xyz)} endpoints survive NMS "

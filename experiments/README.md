@@ -264,6 +264,9 @@ One stage at a time (same target names in both launchers):
 | `gw_field` | the through-cloud distance field | CPU, RAM-bound |
 | `gw_train` | train the decoder by simulated walking | GPU, hours |
 | `gw_infer` | detections + metrics + figures | GPU, ~minutes |
+| `gw_diag` | why recall is what it is (walk / NMS / threshold) | GPU, ~minutes |
+| `gw_height` | canopy height vs the annotators' criterion | CPU, ~minutes |
+| `gw_head` | can the tree/not-tree decision be trained on its own? | GPU, walk-bound; resumable |
 
 ```bat
 run_experiments.cmd gw_test       :: ...or gw_field | gw_train | gw_infer
@@ -406,6 +409,27 @@ walker ride the ground instead of moving freely in 3D), `GW_SCORE_TAU` (0.5),
 Train: `GW_ITERS` (9000, per run), `GW_BATCH` (48), `GW_LR`, `GW_EVAL_EVERY`,
 `GW_NEAR_FRAC` (0.7), `GW_NEAR_R`, `GW_RESUME` (1), `GW_SEED`.
 Infer: `GW_INFER_REGION` (`val`|`all`), `GW_CONF_THRESH`, `GW_WALK_WIN` (40 m).
+Throughput: `GW_DETECT_BATCH` (64 — seeds walked per encoder forward; this was a
+hard-coded 256, which is ~1M points per Sonata pass and, on top of the ~8.5 GB
+the scene store pins on the card, does not leave much of a 16 GB GPU. Windows
+spills to host RAM instead of raising, at a fraction of the bandwidth: a
+59k-seed walk at 256 ran **over 24 h without finishing**, while training, at 48,
+holds its rate. Raise it only if the progress line's GPU figure shows headroom), `GW_TF32` (1),
+`GW_ENC_AMP` (0 — bf16 encoder, roughly another 2x, at the cost of the last
+digits of every reported number), `GW_PROGRESS_S` (30 s between progress lines,
+0 = silent), `GW_PROFILE` (1 = add a `ball/enc/ctx/dec` time breakdown to each
+progress line; it synchronises, so it is not free), `GW_DEVICE` (`cuda`).
+Tree head: `GW_HEAD_SEEDS` (0 = walk every seed; a cap thins the hard negatives
+only), `GW_HEAD_CHUNK` (8192 — how often the walk is checkpointed to disk),
+`GW_HEAD_CACHE_GB` (6 — RAM for the one-time token cache, which is what makes
+the epochs cost no encoder time), `GW_HEAD_FORCE` (1 = ignore both caches and
+mine again), plus `GW_HEAD_EPOCHS`/`BATCH`/`LR`/`EASY`/`JITTER`/`TARGET_F1`.
+
+The walk (`gw_infer`, `gw_diag`, `gw_head`, and every `gw_train` eval) prints
+position, rate, ETA and peak GPU memory as it goes, and `gw_head` checkpoints
+its endpoints every `GW_HEAD_CHUNK` seeds — a Ctrl-C costs one chunk, not the
+whole pass. Both of its caches live in `data/geowalker/`
+(`treehead_endpoints.npz`, `treehead_dataset.npz`).
 
 ### How it differs from BaseWalker
 

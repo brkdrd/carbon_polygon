@@ -125,7 +125,7 @@ def main():
     print(f"[gw-diag] {len(va_seeds):,} val seeds | {len(gt)} val GT bases")
 
     enc = M.load_encoder()
-    ends, scores = M.detect(dec, enc, scene, dem, va_seeds)
+    ends, scores = M.detect(dec, enc, scene, dem, va_seeds, label="diag")
 
     out = dict(checkpoint=dict(it=ck.get("it"), val=ck.get("val")),
                match_r=MATCH_R, n_seeds=int(len(va_seeds)), n_gt=int(len(gt)))

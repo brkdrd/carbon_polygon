@@ -112,7 +112,8 @@ def evaluate(dec, enc, scene, dem, sub, val_bases, match_r=MATCH_R):
     The cut is swept over score QUANTILES, not a fixed 0.05-0.95 grid: the head
     saturates near 0.55, so most of that grid was dead range.
     """
-    ends, scores = M.detect(dec, enc, scene, dem, sub.astype(np.float32))
+    ends, scores = M.detect(dec, enc, scene, dem, sub.astype(np.float32),
+                            label="eval")
     keep = M.nms(ends, scores, radius=M.NMS_R)
     best = dict(f1=-1.0, thresh=0.0)
     for thr in M.sweep_thresholds(scores[keep]):

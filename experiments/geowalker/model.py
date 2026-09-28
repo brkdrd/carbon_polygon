@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 
 import numpy as np
 import torch
@@ -76,8 +77,95 @@ DEM_PROJECT = os.environ.get("GW_DEM_PROJECT", "0") == "1"
 SCORE_TAU = float(os.environ.get("GW_SCORE_TAU", "0.5"))  # score = exp(-g/tau)
 NMS_R = float(os.environ.get("GW_NMS_R", "0.5"))
 
+# Inference batch. This used to be a hard-coded 256, which is 5x the encoder
+# batch training ever runs (GW_BATCH=48): 256 spheres x PTS_CAP is ~1M points
+# per forward, and on top of the ~8.5 GB the scene store already pins on the
+# card (267M pts x xyz+normal+order) that does not leave much of a 16 GB GPU.
+# Windows does not raise when it runs out, it spills to host RAM at a fraction
+# of the bandwidth. Observed: a 59k-seed walk at 256 ran >24 h without
+# finishing, while training at 48 holds its rate for thousands of iterations.
+# The spill is the suspect, not a proven cause — GW_PROFILE=1 and the GPU
+# figure on the progress line are what settle it before raising this again.
+DETECT_BATCH = int(os.environ.get("GW_DETECT_BATCH", "64"))
+DEVICE = os.environ.get("GW_DEVICE", "cuda")   # cpu = smoke-test the flow
+PROGRESS_S = float(os.environ.get("GW_PROGRESS_S", "30"))   # 0 = silent
+PROFILE = os.environ.get("GW_PROFILE", "0") == "1"          # phase breakdown
+TF32 = os.environ.get("GW_TF32", "1") != "0"
+ENC_AMP = os.environ.get("GW_ENC_AMP", "0") == "1"          # bf16 encoder
+
 # context radius: the oldest memory sphere can be MEM full steps behind
 R_CTX = SPHERE_R + MEM * MAX_STEP
+
+# TF32 for the fp32 matmuls: the encoder is frozen and the decoder is 3 tiny
+# attention blocks, so this is throughput for free. Printed, not silent — it
+# changes the last digits of every number a run reports.
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = TF32
+    torch.backends.cudnn.allow_tf32 = TF32
+    print(f"[gw] precision: TF32 {'ON' if TF32 else 'OFF'} (GW_TF32) | "
+          f"encoder autocast {'bf16' if ENC_AMP else 'fp32'} (GW_ENC_AMP) | "
+          f"detect batch {DETECT_BATCH} (GW_DETECT_BATCH)", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# progress accounting
+# ---------------------------------------------------------------------------
+def hms(sec: float) -> str:
+    sec = max(float(sec), 0.0)
+    if sec < 90:
+        return f"{sec:.0f}s"
+    if sec < 5400:
+        return f"{int(sec // 60)}m{int(sec % 60):02d}s"
+    return f"{int(sec // 3600)}h{int(sec % 3600) // 60:02d}m"
+
+
+def gpu_mem() -> str:
+    if not torch.cuda.is_available():
+        return ""
+    return (f" | GPU {torch.cuda.max_memory_allocated() / 1e9:.1f}/"
+            f"{torch.cuda.max_memory_reserved() / 1e9:.1f} GB peak")
+
+
+_PH: dict = {}
+
+
+class phase:
+    """Accumulate wall time per phase, for the progress line's breakdown.
+
+    A no-op unless GW_PROFILE=1: attributing GPU time needs a synchronise per
+    phase, and the sync is not free on a card this fast.
+    """
+
+    __slots__ = ("k", "t")
+
+    def __init__(self, k):
+        self.k = k
+
+    def __enter__(self):
+        if PROFILE:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            self.t = time.perf_counter()
+        return self
+
+    def __exit__(self, *exc):
+        if PROFILE:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            _PH[self.k] = _PH.get(self.k, 0.0) + time.perf_counter() - self.t
+        return False
+
+
+def phase_report(reset=True) -> str:
+    """"enc 71% ball 18% ctx 6% dec 5%" — where the time actually went."""
+    if not _PH:
+        return ""
+    tot = sum(_PH.values()) or 1.0
+    s = " ".join(f"{k} {100 * v / tot:.0f}%"
+                 for k, v in sorted(_PH.items(), key=lambda kv: -kv[1]))
+    if reset:
+        _PH.clear()
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -131,33 +219,49 @@ def batch_ball(store, centers: torch.Tensor, r: float):
     Returns flat (idx, owner), grouped by owner. One GPU->CPU sync for the whole
     batch instead of one per walker: the bucket arithmetic runs in numpy and the
     radius test runs once, batched, on the GPU.
+
+    The row gather is ONE index computation on the device. Slicing `store.order`
+    row by row in Python launched ~5 kernels per walker per step, which is 2.7M
+    launches for a 59k-seed walk of 9 steps — tens of minutes of pure launch
+    overhead, all of it in front of the work that matters.
     """
     dev = store.device
     cs = _cell_start_np(store)
     cnp = centers.detach().cpu().numpy()
-    rows, own_b, own_n = [], [], []
-    for b in range(len(cnp)):
-        cx, cy = float(cnp[b][0]), float(cnp[b][1])
-        ix0 = max(0, int((cx - r - store.x0) / store.cell))
-        ix1 = min(store.nx - 1, int((cx + r - store.x0) / store.cell))
-        iy0 = max(0, int((cy - r - store.y0) / store.cell))
-        iy1 = min(store.ny - 1, int((cy + r - store.y0) / store.cell))
-        if ix1 < ix0 or iy1 < iy0:
-            continue
-        for iy in range(iy0, iy1 + 1):
-            s = int(cs[iy * store.nx + ix0])
-            e = int(cs[iy * store.nx + ix1 + 1])
-            if e > s:
-                rows.append(store.order[s:e])
-                own_b.append(b)
-                own_n.append(e - s)
-    if not rows:
-        z = torch.zeros(0, dtype=torch.long, device=dev)
+    B = len(cnp)
+    z = torch.zeros(0, dtype=torch.long, device=dev)
+    if B == 0:
         return z, z
-    idx = torch.cat(rows)
-    owner = torch.repeat_interleave(
-        torch.tensor(own_b, dtype=torch.long, device=dev),
-        torch.tensor(own_n, dtype=torch.long, device=dev))
+    # same arithmetic as the scalar version: truncate toward zero, then clamp
+    ix0 = np.maximum(0, ((cnp[:, 0] - r - store.x0) / store.cell).astype(np.int64))
+    ix1 = np.minimum(store.nx - 1,
+                     ((cnp[:, 0] + r - store.x0) / store.cell).astype(np.int64))
+    iy0 = np.maximum(0, ((cnp[:, 1] - r - store.y0) / store.cell).astype(np.int64))
+    iy1 = np.minimum(store.ny - 1,
+                     ((cnp[:, 1] + r - store.y0) / store.cell).astype(np.int64))
+    n_row = np.where((ix1 >= ix0) & (iy1 >= iy0), iy1 - iy0 + 1, 0)
+    if int(n_row.sum()) == 0:
+        return z, z
+
+    # one (start, length) pair per bucket row, walker-major then row-major —
+    # the order the Python loop produced, so `idx` comes out identical
+    row_b = np.repeat(np.arange(B, dtype=np.int64), n_row)
+    within = np.arange(int(n_row.sum())) - np.repeat(np.cumsum(n_row) - n_row, n_row)
+    base = (iy0[row_b] + within) * store.nx
+    s = cs[base + ix0[row_b]]
+    e = cs[base + ix1[row_b] + 1]
+    nz = (e - s) > 0
+    s, n, row_b = s[nz], (e - s)[nz], row_b[nz]
+    if len(s) == 0:
+        return z, z
+
+    n_t = torch.as_tensor(n, device=dev)
+    off = torch.cumsum(n_t, 0) - n_t
+    pos = (torch.arange(int(n.sum()), device=dev)
+           - torch.repeat_interleave(off, n_t)
+           + torch.repeat_interleave(torch.as_tensor(s, device=dev), n_t))
+    idx = store.order[pos]
+    owner = torch.repeat_interleave(torch.as_tensor(row_b, device=dev), n_t)
     d2 = ((store.xyz[idx] - centers.detach()[owner]) ** 2).sum(-1)
     keep = d2 <= r * r
     return idx[keep], owner[keep]
@@ -253,7 +357,8 @@ def encode_spheres(enc, scene: SceneStore, centers: torch.Tensor, r=SPHERE_R):
     """
     B = len(centers)
     dev = scene.device
-    crops = ball_lists(scene, centers, r)
+    with phase("ball"):
+        crops = ball_lists(scene, centers, r)
     feats = [torch.zeros(0, 512, device=dev) for _ in range(B)]
     coords = [torch.zeros(0, 3, device=dev) for _ in range(B)]
     owners = [b for b in range(B) if len(crops[b]) >= 16]
@@ -275,12 +380,16 @@ def encode_spheres(enc, scene: SceneStore, centers: torch.Tensor, r=SPHERE_R):
         counts.append(len(crops[b]))
 
     coord = torch.cat(coord_l)
-    point = enc(dict(
-        coord=coord,
-        grid_coord=((coord - coord.min(0).values[None, :]) / GRID).floor().long(),
-        feat=torch.cat(feat_l),
-        offset=torch.cumsum(torch.tensor(counts, device=dev), 0),
-    ))
+    with phase("enc"):
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=ENC_AMP
+                            and dev != "cpu"):
+            point = enc(dict(
+                coord=coord,
+                grid_coord=((coord - coord.min(0).values[None, :])
+                            / GRID).floor().long(),
+                feat=torch.cat(feat_l),
+                offset=torch.cumsum(torch.tensor(counts, device=dev), 0),
+            ))
     assert point.feat.shape[1] == 512, \
         f"expected 512-d coarse tokens, got {point.feat.shape[1]}"
     lo = 0
@@ -303,31 +412,51 @@ def pad_context(hist, centers: torch.Tensor, r_ctx=R_CTX):
     """
     dev = centers.device
     B = len(centers)
-    per_b = [sum(len(h[0][b]) for h in hist) for b in range(B)]
-    T = max(per_b + [0]) + 1
+    newest = list(reversed(hist))                      # a=0 -> newest
+    A = len(newest)
+    cnt = np.array([[len(h[0][b]) for b in range(B)] for h in newest],
+                   dtype=np.int64).reshape(A, B)
+    per_b = cnt.sum(0) if A else np.zeros(B, np.int64)
+    T = (int(per_b.max()) if B else 0) + 1
 
-    tok_feat = torch.zeros(B, T, 512, device=dev)
-    tok_rel = torch.zeros(B, T, 3, device=dev)
-    gate = torch.zeros(B, T, device=dev)
-    age = torch.zeros(B, T, dtype=torch.long, device=dev)
-    mask = torch.zeros(B, T, dtype=torch.bool, device=dev)
-    mask[:, 0] = True
-    gate[:, 0] = 1.0
+    flat_feat = torch.zeros(B * T, 512, device=dev)
+    flat_gate = torch.zeros(B * T, device=dev)
+    flat_age = torch.zeros(B * T, dtype=torch.long, device=dev)
+    flat_mask = torch.zeros(B * T, dtype=torch.bool, device=dev)
+    dummy = torch.arange(B, device=dev) * T            # slot 0 of each walker
+    flat_mask[dummy] = True
+    flat_gate[dummy] = 1.0
 
-    for b in range(B):
-        o = 1
-        for a, (feats, coords) in enumerate(reversed(hist)):   # a=0 -> newest
-            n = len(feats[b])
-            if n == 0:
-                continue
-            rel = coords[b] - centers[b][None, :]              # grad -> center
-            tok_feat[b, o:o + n] = feats[b]
-            tok_rel[b, o:o + n] = rel
-            gate[b, o:o + n] = (1.0 - rel.norm(dim=-1) / r_ctx).clamp_min(0.0)
-            age[b, o:o + n] = a
-            mask[b, o:o + n] = True
-            o += n
-    return tok_feat, tok_rel, gate, age, mask
+    # Every token's destination slot, computed once: segment (a, b) starts at
+    # 1 + the tokens of the newer spheres of the same walker. Assigning those
+    # slices one at a time cost B x (MEM+1) x 5 kernel launches per step, which
+    # at batch 256 is more launch overhead than the attention it feeds.
+    seg = [(a, b) for a in range(A) for b in range(B) if cnt[a, b]]
+    if not seg:
+        return (flat_feat.view(B, T, 512), torch.zeros(B, T, 3, device=dev),
+                flat_gate.view(B, T), flat_age.view(B, T), flat_mask.view(B, T))
+    start = 1 + np.cumsum(np.vstack([np.zeros((1, B), np.int64), cnt[:-1]]), 0)
+    seg_len = np.array([cnt[a, b] for a, b in seg], np.int64)
+    seg_dst = np.array([b * T + start[a, b] for a, b in seg], np.int64)
+    seg_b = np.array([b for _, b in seg], np.int64)
+    seg_a = np.array([a for a, _ in seg], np.int64)
+    off = np.cumsum(seg_len) - seg_len
+    dst = torch.as_tensor(
+        np.arange(int(seg_len.sum())) - np.repeat(off, seg_len)
+        + np.repeat(seg_dst, seg_len), device=dev)
+    tok_b = torch.as_tensor(np.repeat(seg_b, seg_len), device=dev)
+
+    feats_cat = torch.cat([newest[a][0][b] for a, b in seg])
+    coords_cat = torch.cat([newest[a][1][b] for a, b in seg])
+    rel = coords_cat - centers[tok_b]                  # grad -> center
+    flat_rel = torch.zeros(B * T, 3, device=dev)
+    flat_feat[dst] = feats_cat
+    flat_rel[dst] = rel
+    flat_gate[dst] = (1.0 - rel.norm(dim=-1) / r_ctx).clamp_min(0.0)
+    flat_age[dst] = torch.as_tensor(np.repeat(seg_a, seg_len), device=dev)
+    flat_mask[dst] = True
+    return (flat_feat.view(B, T, 512), flat_rel.view(B, T, 3),
+            flat_gate.view(B, T), flat_age.view(B, T), flat_mask.view(B, T))
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +607,8 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
         if record:
             traj.append(c.detach().cpu().numpy().copy())
         if field is not None:
-            gbar, dens, has_pts, finite, npts = field_terms(field, c)
+            with phase("field"):
+                gbar, dens, has_pts, finite, npts = field_terms(field, c)
             n_empty += int((~has_pts).sum().item())
             ball_n.append(float(npts.float().mean()))
             if k == 0:
@@ -506,8 +636,10 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
         hist.append((feats, coords))
         if len(hist) > MEM + 1:
             hist.pop(0)
-        tok_feat, tok_rel, gate, age, mask = pad_context(hist, c)
-        delta, g_pred = dec(tok_feat, tok_rel, gate, age, mask, step=k)
+        with phase("ctx"):
+            tok_feat, tok_rel, gate, age, mask = pad_context(hist, c)
+        with phase("dec"):
+            delta, g_pred = dec(tok_feat, tok_rel, gate, age, mask, step=k)
 
         if field is not None:
             # read-out head: regress the MEASURED field value, detached, so this
@@ -564,19 +696,45 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
 
 
 @torch.no_grad()
-def detect(dec, enc, scene, dem, seeds_np, batch=256, n_steps=N_STEPS,
-           device="cuda"):
+def detect(dec, enc, scene, dem, seeds_np, batch=None, n_steps=N_STEPS,
+           device=None, label="walk", progress=None, base=0, total=None):
     """Walk every seed to its endpoint. Returns (endpoints, scores) as numpy.
 
     The score is the read-out head's own estimate of the through-cloud distance
     at the endpoint, squashed to (0,1]: 1 means "I am standing on a tree base".
+
+    Reports rate and ETA every GW_PROGRESS_S seconds. This walk is the most
+    expensive thing in the project — 9 encoder passes per batch, one per
+    simulated step — and it used to run to completion in silence, which is how a
+    pass running at a fraction of its expected rate looked exactly like one that
+    was nearly done.
+
+    `base`/`total` let a caller that walks in chunks report one global position
+    instead of a counter that restarts at every chunk.
     """
+    batch = int(batch or DETECT_BATCH)
+    device = device or DEVICE
+    every = PROGRESS_S if progress is None else progress
+    n = len(seeds_np)
     ends, scores = [], []
-    for s in range(0, len(seeds_np), batch):
+    t0 = last = time.time()
+    for s in range(0, n, batch):
         seeds = torch.from_numpy(seeds_np[s:s + batch].astype(np.float32)).to(device)
         seeds = dem.project(seeds).detach()   # same start as training
         _, c, sc, _ = rollout(dec, enc, scene, None, dem, seeds,
                               n_steps=n_steps, train=False)
         ends.append(c.cpu().numpy())
         scores.append(sc.cpu().numpy())
+        done = min(s + batch, n)
+        now = time.time()
+        if every and (now - last >= every or done == n):
+            rate = done / max(now - t0, 1e-9)
+            of = int(total or n)
+            left = of - (base + done)
+            ph = phase_report()
+            print(f"[gw-{label}] {base + done:,}/{of:,} "
+                  f"({100 * (base + done) / of:.0f}%) | {rate:.0f} seeds/s | "
+                  f"{hms(now - t0)} elapsed | ETA {hms(left / max(rate, 1e-9))}"
+                  f"{gpu_mem()}" + (f" | {ph}" if ph else ""), flush=True)
+            last = now
     return np.concatenate(ends), np.concatenate(scores)
