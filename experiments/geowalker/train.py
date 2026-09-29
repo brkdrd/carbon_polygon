@@ -125,7 +125,7 @@ def evaluate(dec, enc, scene, dem, sub, val_bases, match_r=MATCH_R):
 
 
 def main():
-    dev = "cuda"
+    dev = M.DEVICE
     if not FIELD.exists():
         raise SystemExit(f"[gw-train] {FIELD} missing — run gw_field first")
 

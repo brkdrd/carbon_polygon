@@ -588,11 +588,13 @@ def surveyed_mask(gt_xy, cell=10.0, dilate=2):
 # rollout
 # ---------------------------------------------------------------------------
 def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
-            record=False):
+            record=False, head=None, head_r=None):
     """Walk `seeds` (B,3) for n_steps, scoring every simulated step.
 
     field=None -> pure inference (no labels needed, no loss).
     record=True -> info["traj"] holds the (n_steps+1, B, 3) path, for figures.
+    head != None -> info["head_score"] holds a trained tree head's opinion of
+    the ENDPOINT, scored from the sphere this walk already encoded there.
     Returns (loss, end_centers, end_score, info).
     """
     c = seeds.clone()
@@ -602,7 +604,7 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
     step_norms, ball_n, n_empty = [], [], 0
     g_pred = torch.zeros(B, device=seeds.device)
 
-    traj = []
+    traj, h_score = [], None
     for k in range(n_steps + 1):
         if record:
             traj.append(c.detach().cpu().numpy().copy())
@@ -651,6 +653,17 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
                          * (per * m).sum() / m.sum().clamp_min(1.0))
 
         if k == n_steps:
+            if head is not None:
+                # The head judges ONE sphere at its own radius; the decoder reads
+                # that sphere PLUS the MEM before it, gated at R_CTX. So its
+                # input is rebuilt from the newest sphere alone — the very tokens
+                # this step just encoded. That makes scoring an endpoint one
+                # 1.8M-param forward per batch instead of a second Sonata pass
+                # over every endpoint in the region.
+                hf, hr, hg, _ha, hm = pad_context([hist[-1]], c,
+                                                  r_ctx=head_r or SPHERE_R)
+                with phase("head"):
+                    h_score = torch.sigmoid(head(hf, hr, hg, hm))
             break
 
         # No tokens -> no information about where a base is -> no movement.
@@ -673,6 +686,8 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
     score = torch.exp(-torch.expm1(g_pred).clamp_min(0.0) / SCORE_TAU)
     info = dict(step=float(torch.stack(step_norms).mean()) if step_norms else 0.0,
                 n=B, n_empty=n_empty)
+    if h_score is not None:
+        info["head_score"] = h_score
     if record:
         # the k == n_steps pass already recorded the final center
         info["traj"] = np.stack(traj)
@@ -697,11 +712,16 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
 
 @torch.no_grad()
 def detect(dec, enc, scene, dem, seeds_np, batch=None, n_steps=N_STEPS,
-           device=None, label="walk", progress=None, base=0, total=None):
+           device=None, label="walk", progress=None, base=0, total=None,
+           head=None, head_r=None):
     """Walk every seed to its endpoint. Returns (endpoints, scores) as numpy.
 
     The score is the read-out head's own estimate of the through-cloud distance
     at the endpoint, squashed to (0,1]: 1 means "I am standing on a tree base".
+
+    Given `head`, returns (endpoints, readout_scores, head_scores) instead: the
+    same endpoints ranked two ways, which is the only fair way to compare a
+    scorer against the incumbent.
 
     Reports rate and ETA every GW_PROGRESS_S seconds. This walk is the most
     expensive thing in the project — 9 encoder passes per batch, one per
@@ -716,15 +736,18 @@ def detect(dec, enc, scene, dem, seeds_np, batch=None, n_steps=N_STEPS,
     device = device or DEVICE
     every = PROGRESS_S if progress is None else progress
     n = len(seeds_np)
-    ends, scores = [], []
+    ends, scores, heads = [], [], []
     t0 = last = time.time()
     for s in range(0, n, batch):
         seeds = torch.from_numpy(seeds_np[s:s + batch].astype(np.float32)).to(device)
         seeds = dem.project(seeds).detach()   # same start as training
-        _, c, sc, _ = rollout(dec, enc, scene, None, dem, seeds,
-                              n_steps=n_steps, train=False)
+        _, c, sc, info = rollout(dec, enc, scene, None, dem, seeds,
+                                 n_steps=n_steps, train=False, head=head,
+                                 head_r=head_r)
         ends.append(c.cpu().numpy())
         scores.append(sc.cpu().numpy())
+        if head is not None:
+            heads.append(info["head_score"].float().cpu().numpy())
         done = min(s + batch, n)
         now = time.time()
         if every and (now - last >= every or done == n):
@@ -737,4 +760,6 @@ def detect(dec, enc, scene, dem, seeds_np, batch=None, n_steps=N_STEPS,
                   f"{hms(now - t0)} elapsed | ETA {hms(left / max(rate, 1e-9))}"
                   f"{gpu_mem()}" + (f" | {ph}" if ph else ""), flush=True)
             last = now
-    return np.concatenate(ends), np.concatenate(scores)
+    if head is None:
+        return np.concatenate(ends), np.concatenate(scores)
+    return np.concatenate(ends), np.concatenate(scores), np.concatenate(heads)

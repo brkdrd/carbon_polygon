@@ -99,7 +99,7 @@ def step_profile(dec, enc, scene, dem, field, seeds, out_json):
 
 
 def main():
-    dev = "cuda"
+    dev = M.DEVICE
     if not CKPT.exists():
         raise SystemExit(f"[gw-diag] {CKPT} missing — run gw_train first")
     scene = M.load_scene(BW / "tiles", dev)
