@@ -264,6 +264,7 @@ One stage at a time (same target names in both launchers):
 | `gw_field` | the through-cloud distance field | CPU, RAM-bound |
 | `gw_train` | train the decoder by simulated walking | GPU, hours |
 | `gw_infer` | detections + metrics + figures | GPU, ~minutes |
+| `gw_infer_head` | the same, with endpoints ranked by the `gw_head` classifier instead of the walker's read-out — both rankings reported from one walk | GPU, same cost as `gw_infer` |
 | `gw_diag` | why recall is what it is (walk / NMS / threshold) | GPU, ~minutes |
 | `gw_height` | canopy height vs the annotators' criterion | CPU, ~minutes |
 | `gw_head` | can the tree/not-tree decision be trained on its own? | GPU, walk-bound; resumable |

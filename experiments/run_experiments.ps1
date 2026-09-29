@@ -14,6 +14,8 @@
                                      # vs ground truth (needs a trained model)
     .\run_experiments.ps1 geowalker  # GeoWalker: through-cloud distance field,
                                      # then train + infer the walker on it
+    .\run_experiments.ps1 gw_infer_head  # inference, but endpoints ranked by
+                                     # the gw_head classifier (both reported)
 
   If PowerShell blocks the script, launch it as:
     powershell -ExecutionPolicy Bypass -File .\run_experiments.ps1
@@ -53,7 +55,17 @@ function Invoke-Docker([string[]]$DockerArgs) {
 
 # --no-deps: this script sequences every stage itself, so a `run` must not
 # re-trigger the compose depends_on chain.
-function Invoke-Stage($svc) { Invoke-Docker ($Compose + @("run", "--rm", "--no-deps", $svc)) }
+#
+# $Vars is for the handful of stages that exist in more than one variant (the
+# same image and command, one environment variable apart). compose has no
+# "run with this variable" shorthand, so the -e flags are assembled here — the
+# alternative is telling people to reach past the launcher for raw compose,
+# which is how a documented one-command stage turns into a pasted incantation.
+function Invoke-Stage($svc, [string[]]$Vars = @()) {
+    $e = @()
+    foreach ($kv in $Vars) { $e += @("-e", $kv) }
+    Invoke-Docker ($Compose + @("run", "--rm", "--no-deps") + $e + @($svc))
+}
 
 function Build {
     Log "Building images (prep, sonata, treelearn)"
@@ -105,6 +117,10 @@ function GwTest  { Log "GeoWalker - CPU self-check (no GPU, no data)"; Invoke-St
 function GpuCheck { Log "GPU preflight - does the card reach a container?"; Invoke-Stage "gpu_check" }
 function GwTrain { Log "GeoWalker - training";  Invoke-Stage "geowalker_train" }
 function GwInfer { Log "GeoWalker - inference"; Invoke-Stage "geowalker_infer" }
+# Same walk, endpoints ranked by the gw_head classifier instead of the walker's
+# own read-out; the run prints both rankings side by side. Needs gw_head first.
+function GwInferHead { Log "GeoWalker - inference, ranked by the tree head"
+    Invoke-Stage "geowalker_infer" @("GW_INFER_HEAD=1") }
 function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function GwHeight { Log "GeoWalker - canopy height vs the label criterion"; Invoke-Stage "geowalker_height" }
 function GwHead  { Log "GeoWalker - can the tree/not-tree head be trained?"; Invoke-Stage "geowalker_head" }
@@ -146,11 +162,12 @@ switch ($Target) {
     "gw_field" { GwBuild; GwField }
     "gw_train" { GwBuild; GwTrain }
     "gw_infer" { GwBuild; GwInfer }
+    "gw_infer_head" { GwBuild; GwInferHead }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_diag|gw_height|gw_head]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_diag|gw_height|gw_head]"
         exit 2
     }
 }

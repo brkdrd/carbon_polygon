@@ -79,6 +79,10 @@ gw_test()  { log "GeoWalker — CPU self-check (no GPU, no data)"; $RUN geowalke
 gpu_check() { log "GPU preflight — does the card reach a container?"; $RUN gpu_check; }
 gw_train() { log "GeoWalker — training";  $RUN geowalker_train; }
 gw_infer() { log "GeoWalker — inference"; $RUN geowalker_infer; }
+# Same walk, endpoints ranked by the gw_head classifier instead of the walker's
+# own read-out; the run prints both rankings side by side. Needs gw_head first.
+gw_infer_head() { log "GeoWalker — inference, ranked by the tree head"
+                  $RUN -e GW_INFER_HEAD=1 geowalker_infer; }
 gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
 gw_height() { log "GeoWalker — canopy height vs the label criterion"; $RUN geowalker_height; }
 gw_head()  { log "GeoWalker — can the tree/not-tree head be trained?"; $RUN geowalker_head; }
@@ -116,10 +120,12 @@ case "${1:-all}" in
   gw_field) gw_build; gw_field ;;
   gw_train) gw_build; gw_train ;;
   gw_infer) gw_build; gw_infer ;;
+  gw_infer_head) gw_build; gw_infer_head ;;
   gw_diag) gw_build; gw_diag ;;
   gw_height) gw_build; gw_height ;;
   gw_head) gw_build; gw_head ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
-geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_diag|gw_height|gw_head]"; exit 2 ;;
+geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_diag|\
+gw_height|gw_head]"; exit 2 ;;
 esac
