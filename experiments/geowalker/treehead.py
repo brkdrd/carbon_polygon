@@ -72,7 +72,12 @@ SEED = int(os.environ.get("GW_HEAD_SEED", "0"))
 SEEDS_N = int(os.environ.get("GW_HEAD_SEEDS", "0"))
 CHUNK = int(os.environ.get("GW_HEAD_CHUNK", "8192"))     # walk-resume granularity
 CACHE_GB = float(os.environ.get("GW_HEAD_CACHE_GB", "6"))  # token cache budget
-FORCE = os.environ.get("GW_HEAD_FORCE", "0") == "1"      # ignore both caches
+FORCE = os.environ.get("GW_HEAD_FORCE", "0") == "1"      # remine the dataset
+# Rewalking is the expensive one and is asked for separately: changing what the
+# dataset is MADE of (the knobs above) does not change where the walker stops,
+# so a remine should reuse the endpoints rather than spend the walk again.
+REWALK = os.environ.get("GW_HEAD_REWALK", "0") == "1"
+FORCE = FORCE or REWALK
 ENDS = GW / "treehead_endpoints.npz"                     # partial walk, resumable
 
 
@@ -148,7 +153,7 @@ def walk(dec, enc, scene, dem, seeds, ck):
     sig = _sig(seeds, ck)
     ends = np.zeros((0, 3), np.float32)
     scores = np.zeros(0, np.float32)
-    if ENDS.exists() and not FORCE:
+    if ENDS.exists() and not REWALK:
         z = np.load(ENDS, allow_pickle=False)
         if str(z["sig"]) == sig:
             ends, scores = z["ends"], z["scores"]
@@ -325,6 +330,17 @@ def mine(dec, enc, scene, dem, dev, ck):
                 val_gt=judge[j_val])
 
 
+def auc_of(p, y) -> float:
+    """Rank AUC, Mann-Whitney form."""
+    from scipy.stats import rankdata
+    pos, neg = p[y > 0.5], p[y < 0.5]
+    if not len(pos) or not len(neg):
+        return float("nan")
+    r = rankdata(np.concatenate([pos, neg]))
+    return float((r[:len(pos)].sum() - len(pos) * (len(pos) + 1) / 2)
+                 / (len(pos) * len(neg)))
+
+
 def evaluate(head, tok, rows, y, batch=128):
     head.eval()
     out = []
@@ -333,12 +349,7 @@ def evaluate(head, tok, rows, y, batch=128):
             tf, tr, g, m = tok.get(rows[s:s + batch])
             out.append(torch.sigmoid(head(tf, tr, g, m)).cpu().numpy())
     p = np.concatenate(out)
-    from scipy.stats import rankdata
-    pos, neg = p[y > 0.5], p[y < 0.5]
-    r = rankdata(np.concatenate([pos, neg]))
-    a = float((r[:len(pos)].sum() - len(pos) * (len(pos) + 1) / 2)
-              / max(len(pos) * len(neg), 1))
-    return p, a
+    return p, auc_of(p, y)
 
 
 def main():
@@ -378,6 +389,7 @@ def main():
     rows_va = np.where(blk)[0]
     rows_end = len(X) + np.arange(len(ends))
     ytr, yva = y[rows_tr], y[rows_va]
+    src_va = d["src"][rows_va]          # 0 endpoint-pos, 1 hard neg, 2 jitter, 3 easy
 
     head = TreeHead().to(dev)
     opt = torch.optim.AdamW(head.parameters(), lr=LR, weight_decay=1e-4)
@@ -412,10 +424,18 @@ def main():
                       f"ETA {M.hms((steps_ep - n) / (n / el))}", flush=True)
                 last = time.time()
         p_va, auc = evaluate(head, tok, rows_va, yva)
+        # The AUC over the whole mixture is mostly easy pairs: a jittered label
+        # position against a patch of empty ground 3 m from any tree. Inference
+        # never asks that. It asks ONE question — of the endpoints the walker
+        # actually stopped at, which are bases — so that subset gets its own
+        # number, and it is the one the acceptance test will agree with.
+        ep_m = src_va <= 1.0
+        auc_ep = auc_of(p_va[ep_m], yva[ep_m])
         print(f"[gw-head] epoch {ep:2d} | loss {tot/max(n,1):.4f} | "
-              f"val AUC {auc:.4f} | {time.time()-t0:.0f}s", flush=True)
+              f"val AUC {auc:.4f} (endpoints only {auc_ep:.4f}) | "
+              f"{time.time()-t0:.0f}s", flush=True)
         if auc > best["auc"]:
-            best = dict(auc=auc, epoch=ep)
+            best = dict(auc=auc, auc_endpoints=auc_ep, epoch=ep)
             torch.save(dict(state_dict=head.state_dict(), auc=auc, epoch=ep,
                             head_r=HEAD_R, pos_r=POS_R, neg_r=NEG_R), HEAD_CKPT)
 
@@ -435,6 +455,14 @@ def main():
             if m["f1"] > b["f1"]:
                 b = dict(m, thresh=float(thr), n=int(k.sum()))
         return b
+
+    q = np.percentile(new, [1, 25, 50, 75, 99])
+    print(f"\n[gw-head] head score on the {len(new):,} val endpoints: "
+          f"p01 {q[0]:.3f} p25 {q[1]:.3f} p50 {q[2]:.3f} p75 {q[3]:.3f} "
+          f"p99 {q[4]:.3f}")
+    if q[0] > 0.9 or q[4] - q[0] < 0.1:
+        print("[gw-head]   the score does not spread over the endpoints — it "
+              "cannot threshold them, whatever its AUC on the mixture says")
 
     b_old, b_new = best_f1(old), best_f1(new)
     print(f"\n[gw-head] ===== acceptance test: same endpoints, new score =====")
@@ -457,7 +485,11 @@ def main():
         detect_batch=M.DETECT_BATCH, tf32=M.TF32, enc_amp=M.ENC_AMP,
         n_train=int(len(rows_tr)), n_val=int(len(rows_va)),
         n_hard_negatives=int((d["src"] == 1).sum()),
-        best_val_auc=best["auc"], best_epoch=best["epoch"],
+        best_val_auc=best["auc"],
+        best_val_auc_endpoints_only=best.get("auc_endpoints"),
+        endpoint_score_percentiles=dict(zip(("p01", "p25", "p50", "p75", "p99"),
+                                            [float(v) for v in q])),
+        best_epoch=best["epoch"],
         incumbent=b_old, tree_head=b_new, delta_f1=gain,
         target_f1=TARGET_F1, sufficient=bool(b_new["f1"] >= TARGET_F1)),
         indent=2, default=float))

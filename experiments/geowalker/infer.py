@@ -49,7 +49,16 @@ SURVEY_CELL = float(os.environ.get("GW_SURVEY_CELL", "10.0"))
 SURVEY_DILATE = int(os.environ.get("GW_SURVEY_DILATE", "2"))
 
 
-def detections_figure(scene, seeds, gt, det_xyz, f1, region, out):
+def detections_figure(scene, seeds, gt, det_xyz, f1, region, out,
+                      inside_mask=None, f1_surveyed=None):
+    """Top-down GT vs detections.
+
+    Detections outside the surveyed region are drawn apart from the rest: the
+    RTK survey does not cover the whole scanned scene, so a detection out there
+    has no green cross to match and reads as a false positive in the picture
+    whether or not a tree is standing at it. Keeping them one colour made the
+    map look far worse than the surveyed-only metric says it is.
+    """
     xyz = scene.xyz.cpu().numpy()
     x0, x1 = seeds[:, 0].min() - 5, seeds[:, 0].max() + 5
     y0, y1 = seeds[:, 1].min() - 5, seeds[:, 1].max() + 5
@@ -58,12 +67,24 @@ def detections_figure(scene, seeds, gt, det_xyz, f1, region, out):
     fig, ax = plt.subplots(figsize=(14, 12))
     ax.scatter(sub[:, 0], sub[:, 1], s=0.05, c="0.75", marker=".", linewidths=0)
     ax.scatter(gt[:, 0], gt[:, 1], s=42, marker="x", c="green", label="GT base")
-    ax.scatter(det_xyz[:, 0], det_xyz[:, 1], s=26, marker="o",
-               facecolors="none", edgecolors="red", label="detection")
+    if inside_mask is None:
+        ax.scatter(det_xyz[:, 0], det_xyz[:, 1], s=26, marker="o",
+                   facecolors="none", edgecolors="red", label="detection")
+    else:
+        ins = np.asarray(inside_mask, bool)
+        ax.scatter(det_xyz[~ins, 0], det_xyz[~ins, 1], s=26, marker="o",
+                   facecolors="none", edgecolors="darkorange", alpha=0.7,
+                   label=f"detection, unsurveyed ({int((~ins).sum())})")
+        ax.scatter(det_xyz[ins, 0], det_xyz[ins, 1], s=26, marker="o",
+                   facecolors="none", edgecolors="red",
+                   label=f"detection, judgeable ({int(ins.sum())})")
     ax.set_aspect("equal")
     ax.legend()
-    ax.set_title(f"GeoWalker detections ({region}) | F1@0.5m {f1:.3f} | "
-                 f"{len(det_xyz)} det / {len(gt)} GT")
+    title = (f"GeoWalker detections ({region}) | F1@0.5m {f1:.3f}"
+             + (f" | surveyed only {f1_surveyed:.3f}"
+                if f1_surveyed is not None else "")
+             + f" | {len(det_xyz)} det / {len(gt)} GT")
+    ax.set_title(title)
     fig.savefig(out, dpi=130, bbox_inches="tight")
     print(f"[gw-infer] image -> {out}")
 
@@ -301,7 +322,9 @@ def main():
 
     detections_figure(scene, seeds, gt, det_xyz, metrics["@0.5m"]["f1"],
                       f"{region} | {scorer}",
-                      C.RESULTS / "21_geowalker_detections.png")
+                      C.RESULTS / "21_geowalker_detections.png",
+                      inside_mask=inside(det_xyz[:, :2]),
+                      f1_surveyed=metrics["@0.5m_surveyed"]["f1"])
     field_npz = GW / "field.npz"
     if field_npz.exists():
         walks_figure(dec, enc, scene, dem, field_npz, seeds, gt,
