@@ -348,6 +348,11 @@ def field_terms(field: FieldStore, centers: torch.Tensor, r=FIELD_R,
 # ---------------------------------------------------------------------------
 # frozen Sonata encoding of the sphere crops
 # ---------------------------------------------------------------------------
+def step_score(g_pred):
+    """Read-out -> (0,1]. 1 means "I am standing on a tree base"."""
+    return torch.exp(-torch.expm1(g_pred).clamp_min(0.0) / SCORE_TAU)
+
+
 @torch.no_grad()
 def encode_spheres(enc, scene: SceneStore, centers: torch.Tensor, r=SPHERE_R):
     """Encode the sphere around each (detached) center with the frozen encoder.
@@ -604,7 +609,7 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
     step_norms, ball_n, n_empty = [], [], 0
     g_pred = torch.zeros(B, device=seeds.device)
 
-    traj, h_score = [], None
+    traj, traj_score, h_score = [], [], None
     for k in range(n_steps + 1):
         if record:
             traj.append(c.detach().cpu().numpy().copy())
@@ -642,6 +647,12 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
             tok_feat, tok_rel, gate, age, mask = pad_context(hist, c)
         with phase("dec"):
             delta, g_pred = dec(tok_feat, tok_rel, gate, age, mask, step=k)
+        if record:
+            # The read-out's opinion of where the walker is STANDING, step by
+            # step. Only the last one ever left this function, so a walker that
+            # touched a base at step 5 and drifted off by step 8 was recorded as
+            # wherever it drifted to.
+            traj_score.append(step_score(g_pred).detach().cpu().numpy().copy())
 
         if field is not None:
             # read-out head: regress the MEASURED field value, detached, so this
@@ -683,7 +694,7 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
         if not train:
             c = c.detach()
 
-    score = torch.exp(-torch.expm1(g_pred).clamp_min(0.0) / SCORE_TAU)
+    score = step_score(g_pred)
     info = dict(step=float(torch.stack(step_norms).mean()) if step_norms else 0.0,
                 n=B, n_empty=n_empty)
     if h_score is not None:
@@ -691,6 +702,7 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
     if record:
         # the k == n_steps pass already recorded the final center
         info["traj"] = np.stack(traj)
+        info["traj_score"] = np.stack(traj_score)
     loss = None
     if field is not None:
         zero = seeds.new_zeros(())
@@ -713,15 +725,18 @@ def rollout(dec, enc, scene, field, dem, seeds, n_steps=N_STEPS, train=True,
 @torch.no_grad()
 def detect(dec, enc, scene, dem, seeds_np, batch=None, n_steps=N_STEPS,
            device=None, label="walk", progress=None, base=0, total=None,
-           head=None, head_r=None):
+           head=None, head_r=None, traj=False, out=None):
     """Walk every seed to its endpoint. Returns (endpoints, scores) as numpy.
 
     The score is the read-out head's own estimate of the through-cloud distance
     at the endpoint, squashed to (0,1]: 1 means "I am standing on a tree base".
 
-    Given `head`, returns (endpoints, readout_scores, head_scores) instead: the
-    same endpoints ranked two ways, which is the only fair way to compare a
-    scorer against the incumbent.
+    Anything else the walk produced goes into `out`, a dict the caller passes
+    in — the return shape stays (endpoints, scores) however many extras are
+    asked for:
+      out["head"]        a trained head's score per endpoint (needs `head`)
+      out["traj"]        (n_steps+1, N, 3) every position the walk stood at
+      out["traj_score"]  (n_steps+1, N)    the read-out at each of them
 
     Reports rate and ETA every GW_PROGRESS_S seconds. This walk is the most
     expensive thing in the project — 9 encoder passes per batch, one per
@@ -736,18 +751,21 @@ def detect(dec, enc, scene, dem, seeds_np, batch=None, n_steps=N_STEPS,
     device = device or DEVICE
     every = PROGRESS_S if progress is None else progress
     n = len(seeds_np)
-    ends, scores, heads = [], [], []
+    ends, scores, heads, trs, trss = [], [], [], [], []
     t0 = last = time.time()
     for s in range(0, n, batch):
         seeds = torch.from_numpy(seeds_np[s:s + batch].astype(np.float32)).to(device)
         seeds = dem.project(seeds).detach()   # same start as training
         _, c, sc, info = rollout(dec, enc, scene, None, dem, seeds,
                                  n_steps=n_steps, train=False, head=head,
-                                 head_r=head_r)
+                                 head_r=head_r, record=traj)
         ends.append(c.cpu().numpy())
         scores.append(sc.cpu().numpy())
         if head is not None:
             heads.append(info["head_score"].float().cpu().numpy())
+        if traj:
+            trs.append(info["traj"])
+            trss.append(info["traj_score"])
         done = min(s + batch, n)
         now = time.time()
         if every and (now - last >= every or done == n):
@@ -760,6 +778,10 @@ def detect(dec, enc, scene, dem, seeds_np, batch=None, n_steps=N_STEPS,
                   f"{hms(now - t0)} elapsed | ETA {hms(left / max(rate, 1e-9))}"
                   f"{gpu_mem()}" + (f" | {ph}" if ph else ""), flush=True)
             last = now
-    if head is None:
-        return np.concatenate(ends), np.concatenate(scores)
-    return np.concatenate(ends), np.concatenate(scores), np.concatenate(heads)
+    if out is not None:
+        if head is not None:
+            out["head"] = np.concatenate(heads)
+        if traj:
+            out["traj"] = np.concatenate(trs, axis=1)
+            out["traj_score"] = np.concatenate(trss, axis=1)
+    return np.concatenate(ends), np.concatenate(scores)

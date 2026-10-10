@@ -121,6 +121,11 @@ function GwInfer { Log "GeoWalker - inference"; Invoke-Stage "geowalker_infer" }
 # own read-out; the run prints both rankings side by side. Needs gw_head first.
 function GwInferHead { Log "GeoWalker - inference, ranked by the tree head"
     Invoke-Stage "geowalker_infer" @("GW_INFER_HEAD=1") }
+# The post-walk evidence stage: best step of each walk, converging walkers
+# counted as votes, canopy-height gate. Needs the CHM, so gw_height runs first
+# (it reuses an existing chm.npz, so this is cheap on a second run).
+function GwInferAgg { Log "GeoWalker - inference + post-walk evidence stage"
+    Invoke-Stage "geowalker_infer" @("GW_AGGREGATE=1") }
 function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function GwHeight { Log "GeoWalker - canopy height vs the label criterion"; Invoke-Stage "geowalker_height" }
 function GwHead  { Log "GeoWalker - can the tree/not-tree head be trained?"; Invoke-Stage "geowalker_head" }
@@ -163,11 +168,12 @@ switch ($Target) {
     "gw_train" { GwBuild; GwTrain }
     "gw_infer" { GwBuild; GwInfer }
     "gw_infer_head" { GwBuild; GwInferHead }
+    "gw_infer_agg" { GwBuild; GwHeight; GwInferAgg }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_diag|gw_height|gw_head]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_diag|gw_height|gw_head]"
         exit 2
     }
 }

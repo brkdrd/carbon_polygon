@@ -265,6 +265,7 @@ One stage at a time (same target names in both launchers):
 | `gw_train` | train the decoder by simulated walking | GPU, hours |
 | `gw_infer` | detections + metrics + figures | GPU, ~minutes |
 | `gw_infer_head` | the same, with endpoints ranked by the `gw_head` classifier instead of the walker's read-out — both rankings reported from one walk | GPU, same cost as `gw_infer` |
+| `gw_infer_agg` | the same walk read properly: best step per walker instead of the last, converging walkers counted as votes instead of suppressed, canopy-height gate from `gw_height`. Every pipeline reported in one table | GPU, same cost as `gw_infer` |
 | `gw_diag` | why recall is what it is (walk / NMS / threshold) | GPU, ~minutes |
 | `gw_height` | canopy height vs the annotators' criterion | CPU, ~minutes |
 | `gw_head` | can the tree/not-tree decision be trained on its own? | GPU, walk-bound; resumable |

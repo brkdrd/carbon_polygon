@@ -330,6 +330,73 @@ def test_tree_head_dataset_bands_are_disjoint():
     assert TH.POS_R < TH.NEG_R, (TH.POS_R, TH.NEG_R)
 
 
+def test_best_step_beats_the_last_step_when_the_walk_drifts():
+    """A walker that stands on the base at step 5 and drifts off by step 8 is a
+    detection, not a miss — the read-out already judged every step."""
+    import aggregate as A
+    K, N = 9, 3
+    traj = np.zeros((K, N, 3), np.float32)
+    traj[:, 0, 0] = np.linspace(0, 8, K)        # walks past the base at x=4
+    traj[:, 1, 0] = 4.0                         # sits on it
+    traj[:, 2, 0] = 20.0                        # never near it
+    score = np.zeros((K, N), np.float32)
+    score[:, 0] = 1.0 - np.abs(traj[:, 0, 0] - 4.0) / 8.0
+    score[:, 1] = 0.9
+    score[:, 2] = 0.1
+    xyz, sc = A.best_along_walk(traj, score)
+    assert abs(xyz[0, 0] - 4.0) < 1e-6, xyz[0]          # the step it was best at
+    assert sc[0] > score[-1, 0]                          # better than the endpoint
+    assert abs(xyz[2, 0] - 20.0) < 1e-6                  # unchanged where flat
+
+
+def test_votes_count_the_pile_instead_of_deleting_it():
+    """NMS keeps one endpoint of a cluster; the cluster size is the measurement."""
+    import aggregate as A
+    rng = np.random.default_rng(0)
+    stem = np.column_stack([rng.normal(10, 0.1, 40), rng.normal(10, 0.1, 40),
+                            rng.uniform(0, 0.4, 40)])          # 40 walkers agree
+    bush = np.column_stack([rng.normal(30, 0.1, 2), rng.normal(30, 0.1, 2),
+                            rng.uniform(0, 0.4, 2)])           # 2 walkers agree
+    xyz = np.vstack([stem, bush])
+    sc = np.full(len(xyz), 0.6)                  # identical scores on purpose
+    cl = A.cluster_votes(xyz, sc, radius=0.5)
+    assert len(cl["n_votes"]) == 2, cl["n_votes"]
+    big, small = max(cl["n_votes"]), min(cl["n_votes"])
+    assert big == 40 and small == 2, cl["n_votes"]
+    conf = A.vote_confidence(cl, v0=4)
+    # same score, different evidence -> different confidence
+    assert conf[np.argmax(cl["n_votes"])] > 2 * conf[np.argmin(cl["n_votes"])]
+
+
+def test_vote_centre_is_closer_to_the_truth_than_any_single_walker():
+    """Averaging a pile beats keeping its loudest member, which is what a 0.5 m
+    matching radius is sensitive to."""
+    import aggregate as A
+    rng = np.random.default_rng(1)
+    truth = np.array([5.0, 5.0])
+    xy = truth + rng.normal(0, 0.3, (60, 2))
+    xyz = np.column_stack([xy, np.zeros(len(xy))])
+    sc = rng.uniform(0.4, 0.6, len(xy))
+    cl = A.cluster_votes(xyz, sc, radius=2.0)
+    assert len(cl["xyz"]) == 1
+    d_centre = np.linalg.norm(cl["xyz"][0, :2] - truth)
+    d_loudest = np.linalg.norm(xyz[sc.argmax(), :2] - truth)
+    assert d_centre < d_loudest, (d_centre, d_loudest)
+    assert d_centre < 0.1, d_centre
+
+
+def test_height_gate_drops_only_what_it_can_prove_is_short():
+    """Unknown canopy height is kept: the gate removes candidates it can prove
+    stand under something too short to have been labelled, and nothing else."""
+    import aggregate as A
+    chm = dict(chm=np.full((20, 20), np.nan, np.float32), x0=0.0, y0=0.0, cell=1.0)
+    chm["chm"][5, 5] = 18.0        # a tree
+    chm["chm"][5, 15] = 1.2        # a bush
+    xy = np.array([[5.5, 5.5], [15.5, 5.5], [100.0, 100.0]])   # tree, bush, off-raster
+    keep, h = A.height_gate(chm, xy, cut=3.0, r=0.0)
+    assert keep.tolist() == [True, False, True], (keep, h)
+
+
 def test_score_is_monotone_in_predicted_distance():
     g = torch.tensor([0.0, 0.5, 2.0, 10.0])
     s = torch.exp(-torch.expm1(g).clamp_min(0.0) / M.SCORE_TAU)

@@ -12,6 +12,12 @@ highest-scoring endpoint of a cluster, so the two scorers do not merely
 re-threshold the same detections — they choose different ones, which is why the
 comparison redoes NMS rather than reusing it.
 
+GW_AGGREGATE=1 adds the post-walk evidence stage (aggregate.py): the best step
+of each walk instead of its last, converging walkers counted as votes instead of
+suppressed, and the canopy-height cut gw_height derived from the labels. Every
+candidate pipeline is scored the same way and reported in one table; the first
+one is what the figures and CSVs describe.
+
 Outputs:
   /results/geowalker_detections.csv       x,y,z,score (local frame), post-NMS
   /results/geowalker_metrics.json         P/R/F1/RMSE at 0.5 m and 1.0 m
@@ -44,6 +50,7 @@ GW = C.DATA / "geowalker"
 CKPT = C.MODELS / "geowalker_decoder.pth"
 N_WALKS = int(os.environ.get("GW_N_WALKS", "300"))
 USE_HEAD = os.environ.get("GW_INFER_HEAD", "0") == "1"
+AGG = os.environ.get("GW_AGGREGATE", "0") == "1"
 # surveyed-region grid: cell size and how far to dilate around a labelled base
 SURVEY_CELL = float(os.environ.get("GW_SURVEY_CELL", "10.0"))
 SURVEY_DILATE = int(os.environ.get("GW_SURVEY_DILATE", "2"))
@@ -182,13 +189,16 @@ def load_tree_head(dev):
     return head, r
 
 
-def sweep_scorer(ends, sc, gt, inside):
-    """NMS + the threshold sweep for ONE ranking of the endpoints.
+def sweep_scorer(ends, sc, gt, inside, nms=True):
+    """NMS + the threshold sweep for ONE ranking of candidates.
 
-    Returns (keep, in_survey, sweep, best_all, best_surveyed). Both scorers go
-    through this, so a comparison cannot accidentally be run two different ways.
+    Returns (keep, in_survey, sweep, best_all, best_surveyed). Every pipeline
+    goes through this, so a comparison cannot accidentally be run two different
+    ways. `nms=False` is for candidates whose own clustering already did the
+    suppression — running it twice would quietly merge neighbouring stems.
     """
-    keep = M.nms(ends, sc, radius=M.NMS_R)
+    keep = (M.nms(ends, sc, radius=M.NMS_R) if nms
+            else np.arange(len(ends)))
     xyz, s = ends[keep], sc[keep]
     ins = inside(xyz[:, :2])
     sweep = []
@@ -229,22 +239,28 @@ def main():
 
     enc = M.load_encoder()
     head, head_r = load_tree_head(dev) if USE_HEAD else (None, None)
-    other, other_name = None, None
-    if head is None:
-        ends, scores = M.detect(dec, enc, scene, dem, seeds.astype(np.float32),
-                                label="infer")
-        scorer = "readout"
-    else:
-        # One walk, two rankings: the head reads the endpoint sphere the walk
-        # already encoded, so the second score costs a 1.8M-param forward per
-        # batch rather than another Sonata pass over every endpoint.
-        ends, other, scores = M.detect(dec, enc, scene, dem,
-                                       seeds.astype(np.float32), label="infer",
-                                       head=head, head_r=head_r)
-        scorer, other_name = "treehead", "readout"
-        print(f"[gw-infer] ranking with the TREE HEAD (scores "
-              f"{scores.min():.3f}-{scores.max():.3f}); the walker's read-out "
-              f"({other.min():.3f}-{other.max():.3f}) is kept for comparison")
+    extra = {}
+    # One walk feeds every candidate pipeline below. The head reads the endpoint
+    # sphere the walk already encoded; the trajectory is what the walk already
+    # computed and used to discard.
+    ends, scores = M.detect(dec, enc, scene, dem, seeds.astype(np.float32),
+                            label="infer", head=head, head_r=head_r,
+                            traj=AGG, out=extra)
+
+    # (name, xyz, score, needs_nms) — the FIRST is what this run reports as its
+    # detections; the rest are scored identically and printed beside it.
+    cands = [("readout", ends, scores, True)]
+    if head is not None:
+        cands.append(("treehead", ends, extra["head"], True))
+    agg_info = None
+    if AGG:
+        import aggregate as A
+        a_xyz, a_conf, agg_info = A.aggregate_walks(
+            extra["traj"], extra["traj_score"], gt_xy=gt[:, :2], chm=A.load_chm())
+        # clustering already suppressed; NMS again would merge real neighbours
+        cands.insert(0, ("aggregate", a_xyz, a_conf, False))
+    elif head is not None:
+        cands.insert(0, cands.pop(1))                 # the head leads if asked
 
     # Which detections are even judgeable: the RTK survey does not cover the
     # whole scanned scene, and a real tree nobody walked to is not a model
@@ -255,36 +271,42 @@ def main():
     # Re-tune the cut HERE: the checkpoint's threshold was chosen at eval-seed
     # density, and the number of detections scales with the seed count, so it
     # does not transfer to a full run.
-    keep, in_survey, sweep, best, best_s = sweep_scorer(ends, scores, gt, inside)
-    kept_xyz, kept_s = ends[keep], scores[keep]
-    print(f"[gw-infer] {len(kept_xyz)} endpoints survive NMS "
+    scored = {nm: sweep_scorer(xyz, sc, gt, inside, nms=nms)
+              for nm, xyz, sc, nms in cands}
+    scorer, pxyz, psc, _ = cands[0]
+    keep, in_survey, sweep, best, best_s = scored[scorer]
+    kept_xyz, kept_s = pxyz[keep], psc[keep]
+    print(f"[gw-infer] [{scorer}] {len(kept_xyz)} candidates after suppression "
           f"(scores {kept_s.min():.3f}-{kept_s.max():.3f})")
     print(f"[gw-infer] inside the surveyed region: {in_survey.sum()} of "
-          f"{len(kept_xyz)} endpoints ({in_survey.mean()*100:.0f}%)")
+          f"{len(kept_xyz)} ({in_survey.mean()*100:.0f}%)")
     print(f"[gw-infer] best F1@0.5m over the sweep: {best['all']['f1']:.3f} "
           f"at thresh {best['thresh']:.3f} (checkpoint said {thresh:.3f})")
     print(f"[gw-infer]   inside the surveyed region: "
           f"{best_s['surveyed']['f1']:.3f} at thresh {best_s['thresh']:.3f}")
 
     comparison = None
-    if other is not None:
-        _, _, sw2, b2, b2_s = sweep_scorer(ends, other, gt, inside)
-        comparison = dict(scorer=other_name, best=b2, best_surveyed=b2_s)
-        print(f"\n[gw-infer] ===== same walk, both rankings (best F1@0.5m) =====")
-        for nm, b, bs in ((scorer, best, best_s), (other_name, b2, b2_s)):
+    if len(cands) > 1:
+        comparison = {nm: dict(best=scored[nm][3], best_surveyed=scored[nm][4])
+                      for nm, *_ in cands[1:]}
+        print(f"\n[gw-infer] ===== one walk, {len(cands)} pipelines "
+              f"(best F1@0.5m) =====")
+        for nm, *_ in cands:
+            b, bs = scored[nm][3], scored[nm][4]
             print(f"  {nm:10s} F1 {b['all']['f1']:.3f} "
                   f"(P {b['all']['precision']:.3f} R {b['all']['recall']:.3f}) "
                   f"| {b['n']} det @ thr {b['thresh']:.3f} "
                   f"| surveyed {bs['surveyed']['f1']:.3f}")
-        d = best["all"]["f1"] - b2["all"]["f1"]
-        print(f"  the head is {'ahead' if d > 0 else 'behind'} by "
-              f"{abs(d):.3f} F1 on the full {region} region\n")
+        base = scored["readout"][3]["all"]["f1"]
+        d = best["all"]["f1"] - base
+        print(f"  {scorer} vs the incumbent read-out: {d:+.3f} F1 on the full "
+              f"{region} region\n")
 
     if os.environ.get("GW_USE_BEST_THRESH", "1") != "0":
         thresh = best["thresh"]
-    det = keep[scores[keep] >= thresh]
-    det_xyz, det_s = ends[det], scores[det]
-    print(f"[gw-infer] {len(det)} detections at thresh {thresh:.3f}")
+    sel = kept_s >= thresh
+    det_xyz, det_s = kept_xyz[sel], kept_s[sel]
+    print(f"[gw-infer] {len(det_xyz)} detections at thresh {thresh:.3f}")
 
     metrics = {}
     for r in (0.5, 1.0):
@@ -303,9 +325,15 @@ def main():
     # the threshold can be re-tuned offline without another GPU run.
     cols = [kept_xyz, kept_s, in_survey.astype(np.float32)]
     hdr = "x,y,z,score,in_surveyed"
-    if other is not None:
-        cols.append(other[keep])
-        hdr += f",score_{other_name}"
+    if scorer == "aggregate":
+        cl = agg_info["clusters"]
+        cols += [cl["n_votes"][keep], cl["spread"][keep]]
+        hdr += ",n_votes,spread"
+    else:
+        for nm, _xyz, sc, _n in cands[1:]:
+            if len(sc) == len(ends):              # per-endpoint, same rows
+                cols.append(sc[keep])
+                hdr += f",score_{nm}"
     np.savetxt(C.RESULTS / "geowalker_endpoints.csv", np.column_stack(cols),
                delimiter=",", header=hdr, comments="")
     np.savetxt(C.RESULTS / "geowalker_detections.csv",
@@ -313,9 +341,11 @@ def main():
                header="x,y,z,score", comments="")
     (C.RESULTS / "geowalker_metrics.json").write_text(json.dumps(
         dict(region=region, scorer=scorer, thresh=thresh,
-             n_det=int(len(det)), n_gt=int(len(gt)),
+             n_det=int(len(det_xyz)), n_gt=int(len(gt)),
              n_seeds=int(len(seeds)), n_endpoints=int(len(kept_xyz)),
              metrics=metrics, threshold_sweep=sweep, comparison=comparison,
+             aggregate=agg_info and {k: v for k, v in agg_info.items()
+                                     if k != "clusters"},
              surveyed=dict(cell=SURVEY_CELL, dilate=SURVEY_DILATE,
                            frac_endpoints_inside=float(in_survey.mean())),
              checkpoint=dict(it=ck.get("it"), val=ck.get("val"))), indent=2))
