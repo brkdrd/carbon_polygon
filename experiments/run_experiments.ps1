@@ -14,6 +14,9 @@
                                      # vs ground truth (needs a trained model)
     .\run_experiments.ps1 geowalker  # GeoWalker: through-cloud distance field,
                                      # then train + infer the walker on it
+    .\run_experiments.ps1 gw_infer_patch # inference on the attributed ~2 ha
+                                         # patch only: per-tree and
+                                         # per-species results
     .\run_experiments.ps1 gw_infer_head  # inference, but endpoints ranked by
                                      # the gw_head classifier (both reported)
 
@@ -126,6 +129,12 @@ function GwInferHead { Log "GeoWalker - inference, ranked by the tree head"
 # (it reuses an existing chm.npz, so this is cheap on a second run).
 function GwInferAgg { Log "GeoWalker - inference + post-walk evidence stage"
     Invoke-Stage "geowalker_infer" @("GW_AGGREGATE=1") }
+# The attributed survey patch: ~2 ha, 392 trees, species and girth on 388 -
+# the only region that yields a per-tree and per-species answer sheet, and
+# small enough to finish in a couple of hours. It is TRAINING ground, which
+# the stage prints itself rather than leaving to the reader.
+function GwInferPatch { Log "GeoWalker - inference on the attributed patch"
+    Invoke-Stage "geowalker_infer" @("GW_INFER_REGION=patch", "GW_AGGREGATE=1") }
 function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function GwHeight { Log "GeoWalker - canopy height vs the label criterion"; Invoke-Stage "geowalker_height" }
 function GwHead  { Log "GeoWalker - can the tree/not-tree head be trained?"; Invoke-Stage "geowalker_head" }
@@ -169,11 +178,12 @@ switch ($Target) {
     "gw_infer" { GwBuild; GwInfer }
     "gw_infer_head" { GwBuild; GwInferHead }
     "gw_infer_agg" { GwBuild; GwHeight; GwInferAgg }
+    "gw_infer_patch" { GwBuild; GwHeight; GwInferPatch }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_diag|gw_height|gw_head]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_diag|gw_height|gw_head]"
         exit 2
     }
 }

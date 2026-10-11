@@ -11,5 +11,6 @@ Dockerfile  text eol=lf
 # with core.autocrlf=true corrupts any image it misdetects as text — silently,
 # and the file only fails to open at the other end. Say it explicitly.
 *.png       binary
+*.xlsx      binary
 *.jpg       binary
 *.jpeg      binary

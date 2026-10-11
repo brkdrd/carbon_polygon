@@ -192,6 +192,50 @@ walker endpoints after NMS; metrics are P/R/F1 vs the held-out val block.
 ./run_experiments.sh bw_render  # 4 chunk images: detections vs ground truth
 ```
 
+### The attributed survey patch
+
+`basewalker/poderevka.csv` gives 4,050 tree positions and nothing else. One
+block of it was surveyed properly, and that file is now in the repo:
+
+| file | what it is |
+| --- | --- |
+| `basewalker/poderevka_attributes.csv` | 392 trees in ~1.14 ha with **girth** (388) and a **Latin species name** (388, 25 distinct). Derived from the xlsx below; `n,lat,lon,z` are rows 1..392 of the stem map's `base_1` block, matching to 1e-9, so species joins **by row index** with no spatial matching |
+| `basewalker/poderevka_attributes_source.xlsx` | the survey workbook as received, kept for provenance |
+
+```
+./run_experiments.sh gw_infer_patch     # or: run_experiments.cmd gw_infer_patch
+```
+
+Outputs, named apart so a patch run never overwrites a full one:
+
+```
+results/geowalker_patch_trees.csv              one row per GT base: species,
+                                               girth, found 0/1, error, score
+results/geowalker_patch_detections_status.csv  one row per detection: tp/fp,
+                                               which tree, error
+results/geowalker_patch_metrics.json           P/R/F1 + the patch composition
+results/21_geowalker_patch_detections.png
+```
+
+Two things the stage prints that any reader of its score needs:
+
+* **The patch is training ground.** The train/val split is a quantile on local
+  `x` (rightmost 20% is val) and this patch sits in the left tail, so the model
+  fitted these labels. `patch.trained_on` in the json is `true` and the console
+  says so in capitals. A number from here is an upper bound on unseen
+  performance, not an estimate of it. Holding this patch out instead would mean
+  changing the split in `prep_scene.py` and retraining.
+* **The attributed trees are not the whole GT.** Their hull also contains 147
+  stem-map trees from the same RTK session that nobody attributed — a median
+  12 m from the nearest attributed tree, so different trees, not
+  re-measurements. They are real trees, so they stay in the GT and a miss
+  counts; only the per-species table is restricted to the attributed subset.
+
+Knobs: `GW_PATCH_MARGIN` (3.0 m) is how far outside the surveyed hull still
+counts as judgeable. The footprint is the hull **or** that buffer, because a
+clearing inside the patch is surveyed ground and a detection in it is a real
+false positive.
+
 `bw_train` **resumes**: if `data/models/basewalker_decoder.pth` exists it is
 loaded — weights, AdamW moments and the best val F1 — and `BW_ITERS` more
 iterations are trained on top, on a fresh cosine cycle from `BW_RESUME_LR`
@@ -267,6 +311,7 @@ One stage at a time (same target names in both launchers):
 | `gw_infer_head` | the same, with endpoints ranked by the `gw_head` classifier instead of the walker's read-out — both rankings reported from one walk | GPU, same cost as `gw_infer` |
 | `gw_infer_agg` | the same walk read properly: best step per walker instead of the last, converging walkers counted as votes instead of suppressed, canopy-height gate from `gw_height`. Every pipeline reported in one table | GPU, same cost as `gw_infer` |
 | `gw_diag` | why recall is what it is (walk / NMS / threshold) | GPU, ~minutes |
+| `gw_infer_patch` | inference restricted to the densely attributed survey patch — 392 trees, 25 species, girth on 388, ~1.14 ha. Writes a per-tree answer sheet and a per-species recall. **These are training labels**, and the stage says so | GPU, ~1.6 h (2.9k seeds) |
 | `gw_height` | canopy height vs the annotators' criterion | CPU, ~minutes |
 | `gw_head` | can the tree/not-tree decision be trained on its own? | GPU, walk-bound; resumable |
 

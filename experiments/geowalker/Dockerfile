@@ -20,6 +20,11 @@ COPY geowalker/diagnose.py /app/geowalker/diagnose.py
 COPY geowalker/height.py /app/geowalker/height.py
 COPY geowalker/treehead.py /app/geowalker/treehead.py
 COPY geowalker/aggregate.py /app/geowalker/aggregate.py
+COPY geowalker/patch.py /app/geowalker/patch.py
+# The densely attributed patch: 392 trees with species and girth, and the one
+# region where "which tree did we miss" has an answer. Baked in beside the stem
+# map, not mounted, because the code in this image is baked too.
+COPY basewalker/poderevka_attributes.csv /app/poderevka_attributes.csv
 # CPU regression tests, so a freshly pulled machine can verify the field maths
 # and the loss gradients (seconds, no GPU) before committing hours to training.
 COPY tests/test_geowalker.py /app/tests/test_geowalker.py

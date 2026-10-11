@@ -87,6 +87,11 @@ gw_infer_head() { log "GeoWalker — inference, ranked by the tree head"
 # counted as votes, canopy-height gate. Needs the CHM, so gw_height runs first.
 gw_infer_agg() { log "GeoWalker — inference + post-walk evidence stage"
                  $RUN -e GW_AGGREGATE=1 geowalker_infer; }
+# The attributed survey patch: ~2 ha, 392 trees, species and girth on 388 —
+# the only region that yields a per-tree answer sheet. TRAINING ground; the
+# stage prints that itself rather than leaving it to the reader.
+gw_infer_patch() { log "GeoWalker — inference on the attributed patch"
+                   $RUN -e GW_INFER_REGION=patch -e GW_AGGREGATE=1 geowalker_infer; }
 gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
 gw_height() { log "GeoWalker — canopy height vs the label criterion"; $RUN geowalker_height; }
 gw_head()  { log "GeoWalker — can the tree/not-tree head be trained?"; $RUN geowalker_head; }
@@ -126,11 +131,12 @@ case "${1:-all}" in
   gw_infer) gw_build; gw_infer ;;
   gw_infer_head) gw_build; gw_infer_head ;;
   gw_infer_agg) gw_build; gw_height; gw_infer_agg ;;
+  gw_infer_patch) gw_build; gw_height; gw_infer_patch ;;
   gw_diag) gw_build; gw_diag ;;
   gw_height) gw_build; gw_height ;;
   gw_head) gw_build; gw_head ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
-geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_diag|\
+geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_diag|\
 gw_height|gw_head]"; exit 2 ;;
 esac

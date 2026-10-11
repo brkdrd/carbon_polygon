@@ -404,6 +404,122 @@ def test_score_is_monotone_in_predicted_distance():
     assert bool((s[1:] < s[:-1]).all())
 
 
+# ---------------------------------------------------------------------------
+# the attributed patch: the data join is the premise, so it gets a test
+# ---------------------------------------------------------------------------
+ATTR = next((p for p in (ROOT / "basewalker" / "poderevka_attributes.csv",
+                         Path("/app/poderevka_attributes.csv")) if p.exists()),
+            None)
+STEMS = next((p for p in (ROOT / "basewalker" / "poderevka.csv",
+                          Path("/app/poderevka.csv")) if p.exists()), None)
+
+
+def test_attribute_rows_are_the_first_392_stem_map_rows():
+    """The whole point of the attribute table is that it needs no spatial
+    matching: its rows ARE rows 1..392 of the stem map's base_1 block. If that
+    ever drifts, species would be silently attached to the wrong trees, so the
+    join is asserted rather than assumed."""
+    if ATTR is None or STEMS is None:
+        print("   (skipped: survey CSVs not present)")
+        return
+    import csv as _csv
+    stems = []
+    for r in _csv.reader(open(STEMS)):
+        if not r or not r[0].strip() or r[0].startswith("base"):
+            if r and r[0].startswith("base_2"):
+                break                       # base_1 ends here
+            continue
+        stems.append((r[0].strip(), float(r[1]), float(r[2]), float(r[3])))
+    attr = list(_csv.DictReader(open(ATTR)))
+    assert len(attr) == 392, len(attr)
+    assert len(stems) >= len(attr), (len(stems), len(attr))
+    for i, a in enumerate(attr):
+        n, lat, lon, z = stems[i]
+        assert a["n"] == n, (i, a["n"], n)
+        assert abs(float(a["lat"]) - lat) < 1e-9, (i, a["lat"], lat)
+        assert abs(float(a["lon"]) - lon) < 1e-9, (i, a["lon"], lon)
+        assert abs(float(a["z"]) - z) < 1e-3, (i, a["z"], z)
+
+
+def test_attribute_table_still_carries_species_and_girth():
+    if ATTR is None:
+        print("   (skipped: attribute CSV not present)")
+        return
+    import csv as _csv
+    rows = list(_csv.DictReader(open(ATTR)))
+    named = [r for r in rows if r["species"] and r["name_ambiguous"] == "0"]
+    girth = [r for r in rows if r["girth_cm"]]
+    assert len(named) >= 385, len(named)
+    assert len(girth) >= 385, len(girth)
+    assert len({r["species"] for r in named}) >= 25
+    # ',' is the survey's decimal mark and must have been normalised, or a
+    # plain CSV reader splits a girth in half
+    assert not any("," in r["girth_cm"] for r in rows)
+
+
+def test_patch_footprint_covers_clearings_but_not_the_outside():
+    """Hull OR buffer, not buffer alone: a clearing the surveyors walked
+    through is surveyed ground, so a detection in it is a real false positive
+    and must fall inside the footprint."""
+    import patch as P
+    ring = np.array([[np.cos(t) * 20.0, np.sin(t) * 20.0]
+                     for t in np.linspace(0, 2 * np.pi, 24, endpoint=False)])
+    inside = P.footprint(ring, margin=1.0)
+    assert bool(inside(np.array([[0.0, 0.0]]))[0])          # clearing: inside
+    assert bool(inside(np.array([[20.5, 0.0]]))[0])         # just outside hull
+    assert not bool(inside(np.array([[60.0, 0.0]]))[0])     # well outside
+    assert not bool(inside(np.array([[0.0, 40.0]]))[0])
+
+
+def test_patch_select_reports_training_contamination(monkeypatch=None):
+    """A patch score must never be reportable without its split composition:
+    these labels were trained on, and `trained_on` is what says so."""
+    import patch as P
+    tree_xy = np.array([[0.0, 0.0], [5.0, 0.0], [0.0, 5.0], [5.0, 5.0],
+                        [2.5, 2.5]])
+    attrs = dict(lat=np.zeros(5), lon=np.zeros(5),
+                 species=np.array(["Quercus mongolica"] * 5, object),
+                 ambiguous=np.zeros(5, bool), n=np.arange(5).astype(str),
+                 girth_cm=np.array(["50"] * 5, object), z=np.zeros(5))
+    orig = P.to_local
+    P.to_local = lambda lat, lon, meta=None: tree_xy
+    try:
+        seeds = np.array([[2.5, 2.5, 0.0], [100.0, 100.0, 0.0]])
+        bases = np.array([[0.0, 0.0, 0.0], [5.0, 5.0, 0.0], [90.0, 90.0, 0.0]])
+        is_val = np.array([False, False, True])
+        in_margin = np.zeros(3, bool)
+        s, gt, rows, info = P.select(seeds, bases, is_val, in_margin,
+                                     margin=1.0, attrs=attrs)
+        assert len(s) == 1 and len(gt) == 2, (len(s), len(gt))
+        assert rows.tolist() == [0, 1]
+        assert info["n_gt_in_train"] == 2 and info["n_gt_in_val"] == 0
+        assert info["trained_on"] is True
+        assert info["frac_gt_in_train"] == 1.0
+    finally:
+        P.to_local = orig
+
+
+def test_patch_species_join_refuses_a_distant_base():
+    """A base more than a fork-merge away from any surveyed tree gets no
+    species, rather than the nearest one's."""
+    import patch as P
+    tree_xy = np.array([[0.0, 0.0], [10.0, 0.0]])
+    attrs = dict(lat=np.zeros(2), lon=np.zeros(2),
+                 species=np.array(["Betula davurica", "Salix caprea"], object),
+                 ambiguous=np.zeros(2, bool), n=np.array(["1", "2"]),
+                 girth_cm=np.array(["30", "40"], object), z=np.zeros(2))
+    orig = P.to_local
+    P.to_local = lambda lat, lon, meta=None: tree_xy
+    try:
+        out, ok = P.join_species(np.array([[0.1, 0.0], [5.0, 0.0]]),
+                                 attrs=attrs, tol=0.35)
+        assert ok.tolist() == [True, False]
+        assert out["species"][0] == "Betula davurica"
+        assert out["species"][1] == ""
+    finally:
+        P.to_local = orig
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

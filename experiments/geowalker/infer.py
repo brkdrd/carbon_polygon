@@ -18,6 +18,12 @@ suppressed, and the canopy-height cut gw_height derived from the labels. Every
 candidate pipeline is scored the same way and reported in one table; the first
 one is what the figures and CSVs describe.
 
+GW_INFER_REGION=patch restricts the walk to the densely attributed survey
+patch (patch.py): 392 trees in 2 ha with a species and a girth on 388 of them,
+which is the only region where a per-tree and per-species answer sheet is
+possible. It writes its own files so it cannot overwrite a full run, and it
+reports loudly that the patch is TRAINING ground — see patch.py.
+
 Outputs:
   /results/geowalker_detections.csv       x,y,z,score (local frame), post-NMS
   /results/geowalker_metrics.json         P/R/F1/RMSE at 0.5 m and 1.0 m
@@ -212,6 +218,73 @@ def sweep_scorer(ends, sc, gt, inside, nms=True):
             max(sweep, key=lambda r: r["surveyed"]["f1"]))
 
 
+def patch_tables(gt, det_xyz, det_s, attrs, tag, radius=0.5):
+    """Per-TREE and per-DETECTION answer sheets for the attributed patch.
+
+    The full run reports aggregates; on this patch the survey is complete
+    enough to say which individual tree was found and which was missed, with
+    the species beside it. That is the table the people who commissioned the
+    survey can actually check, and the one place a per-species recall is
+    meaningful — so a miss gets a row of its own rather than only a count.
+    """
+    import patch as P
+    pairs, fp_i, fn_i = M.match_pairs(det_xyz, det_s, gt, radius)
+    sp, known = P.join_species(gt[:, :2], attrs=attrs)
+
+    found = np.zeros(len(gt), bool)
+    dist = np.full(len(gt), np.nan)
+    score = np.full(len(gt), np.nan)
+    for i, j in pairs:
+        found[j] = True
+        dist[j] = float(np.linalg.norm(det_xyz[i] - gt[j]))
+        score[j] = float(det_s[i])
+
+    trees = C.RESULTS / f"geowalker{tag}_trees.csv"
+    with trees.open("w", newline="") as f:
+        f.write("survey_n,species,girth_cm,x,y,z,found,err_m,score\n")
+        for j in range(len(gt)):
+            f.write(f"{sp['n'][j]},{sp['species'][j]},{sp['girth_cm'][j]},"
+                    f"{gt[j,0]:.3f},{gt[j,1]:.3f},{gt[j,2]:.3f},"
+                    f"{int(found[j])},"
+                    f"{'' if not found[j] else f'{dist[j]:.3f}'},"
+                    f"{'' if not found[j] else f'{score[j]:.4f}'}\n")
+
+    gt_of = {int(i): int(j) for i, j in pairs}
+    dets = C.RESULTS / f"geowalker{tag}_detections_status.csv"
+    with dets.open("w", newline="") as f:
+        f.write("x,y,z,score,status,survey_n,species,err_m\n")
+        for i in range(len(det_xyz)):
+            j = gt_of.get(i)
+            st = "tp" if j is not None else "fp"
+            f.write(f"{det_xyz[i,0]:.3f},{det_xyz[i,1]:.3f},{det_xyz[i,2]:.3f},"
+                    f"{det_s[i]:.4f},{st},"
+                    f"{'' if j is None else sp['n'][j]},"
+                    f"{'' if j is None else sp['species'][j]},"
+                    f"{'' if j is None else f'{dist[j]:.3f}'}\n")
+
+    # per-species recall, which is the whole reason this patch is worth running
+    import collections
+    per = collections.defaultdict(lambda: [0, 0])
+    for j in range(len(gt)):
+        name = sp["species"][j]
+        if not name:
+            continue
+        per[name][1] += 1
+        per[name][0] += int(found[j])
+    print(f"[gw-infer] patch: {int(found.sum())}/{len(gt)} GT bases found "
+          f"@{radius} m | {len(fp_i)} false positives | {len(fn_i)} missed")
+    print(f"[gw-infer] of those, {int(known.sum())} carry a surveyed species "
+          f"(the rest are stem-map trees nobody attributed, and still count)")
+    att = known & found
+    print(f"[gw-infer] attributed trees found: {int(att.sum())}/"
+          f"{int(known.sum())} = {att.sum()/max(known.sum(),1)*100:.1f}%")
+    print(f"[gw-infer] ===== recall by species (n >= 3) =====")
+    for name, (h, n) in sorted(per.items(), key=lambda kv: -kv[1][1]):
+        if n >= 3:
+            print(f"   {name:28s} {h:3d}/{n:3d} = {h/n*100:5.1f}%")
+    print(f"[gw-infer] -> {trees.name}, {dets.name}")
+
+
 def main():
     dev = M.DEVICE
     scene = M.load_scene(BW / "tiles", dev)
@@ -228,13 +301,39 @@ def main():
                                   str(ck.get("val", {}).get("thresh", 0.5))))
     print(f"[gw-infer] decoder from it {ck.get('it')} | score thresh {thresh}")
 
-    region = os.environ.get("GW_INFER_REGION", "val")      # val | all
+    region = os.environ.get("GW_INFER_REGION", "val")   # val | all | patch
+    patch_info = patch_attrs = None
     if region == "val":
         seeds = sd["seeds"][sd["is_val"]]
         gt = bases[lab["is_val"]]
+    elif region == "patch":
+        import patch as P
+        patch_attrs = P.load_attributes()
+        seeds, gt, _rows, patch_info = P.select(
+            sd["seeds"], bases, lab["is_val"], lab["in_margin"],
+            attrs=patch_attrs)
+        print(f"[gw-infer] patch: {patch_info['n_surveyed_trees']} surveyed "
+              f"trees | {patch_info['n_species']} species | "
+              f"{patch_info['area_ha']:.2f} ha | margin "
+              f"{patch_info['margin_m']:.0f} m")
+        # say what this will cost before spending it: the walk is ~4.6 sphere
+        # encodes/s on one card and every seed costs GW_STEPS+1 of them.
+        hrs = patch_info["n_seeds"] * (M.N_STEPS + 1) / 4.6 / 3600
+        print(f"[gw-infer] patch: {patch_info['n_seeds']:,} seeds x "
+              f"{M.N_STEPS + 1} positions -> roughly {hrs:.1f} h at the rate "
+              f"the full run measured")
+        if patch_info["trained_on"]:
+            print(f"[gw-infer] *** {patch_info['n_gt_in_train']} of "
+                  f"{patch_info['n_gt']} GT bases here are TRAINING labels "
+                  f"({patch_info['frac_gt_in_train']*100:.0f}%) — the score "
+                  f"below is an upper bound, not a held-out estimate ***")
     else:
         seeds = sd["seeds"]
         gt = bases[~lab["in_margin"]]
+    if len(seeds) == 0:
+        raise SystemExit(f"[gw-infer] region={region} selected no seeds")
+    # a patch run must not overwrite the full run it is compared against
+    tag = "_patch" if region == "patch" else ""
     print(f"[gw-infer] region={region}: {len(seeds):,} seeds | {len(gt)} GT bases")
 
     enc = M.load_encoder()
@@ -334,12 +433,12 @@ def main():
             if len(sc) == len(ends):              # per-endpoint, same rows
                 cols.append(sc[keep])
                 hdr += f",score_{nm}"
-    np.savetxt(C.RESULTS / "geowalker_endpoints.csv", np.column_stack(cols),
+    np.savetxt(C.RESULTS / f"geowalker{tag}_endpoints.csv", np.column_stack(cols),
                delimiter=",", header=hdr, comments="")
-    np.savetxt(C.RESULTS / "geowalker_detections.csv",
+    np.savetxt(C.RESULTS / f"geowalker{tag}_detections.csv",
                np.column_stack([det_xyz, det_s]), delimiter=",",
                header="x,y,z,score", comments="")
-    (C.RESULTS / "geowalker_metrics.json").write_text(json.dumps(
+    (C.RESULTS / f"geowalker{tag}_metrics.json").write_text(json.dumps(
         dict(region=region, scorer=scorer, thresh=thresh,
              n_det=int(len(det_xyz)), n_gt=int(len(gt)),
              n_seeds=int(len(seeds)), n_endpoints=int(len(kept_xyz)),
@@ -348,17 +447,21 @@ def main():
                                      if k != "clusters"},
              surveyed=dict(cell=SURVEY_CELL, dilate=SURVEY_DILATE,
                            frac_endpoints_inside=float(in_survey.mean())),
+             patch=patch_info,
              checkpoint=dict(it=ck.get("it"), val=ck.get("val"))), indent=2))
+
+    if region == "patch":
+        patch_tables(gt, det_xyz, det_s, patch_attrs, tag)
 
     detections_figure(scene, seeds, gt, det_xyz, metrics["@0.5m"]["f1"],
                       f"{region} | {scorer}",
-                      C.RESULTS / "21_geowalker_detections.png",
+                      C.RESULTS / f"21_geowalker{tag}_detections.png",
                       inside_mask=inside(det_xyz[:, :2]),
                       f1_surveyed=metrics["@0.5m_surveyed"]["f1"])
     field_npz = GW / "field.npz"
     if field_npz.exists():
         walks_figure(dec, enc, scene, dem, field_npz, seeds, gt,
-                     C.RESULTS / "22_geowalker_walks.png")
+                     C.RESULTS / f"22_geowalker{tag}_walks.png")
     else:
         print(f"[gw-infer] {field_npz} missing — skipping the walks figure")
 
