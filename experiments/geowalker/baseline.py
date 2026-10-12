@@ -43,7 +43,7 @@ Env:
 Outputs (TAG is "_patch" for the patch region):
   /results/geowalker_baselineTAG_<method>_detections.csv   x,y,z,score
   /results/geowalker_baselineTAG_metrics.json              every method, one file
-  /results/geowalker_baselineTAG_trees.csv                 per surveyed tree, all methods
+  /results/geowalker_baselineTAG_trees.csv       per surveyed tree, all methods
 """
 from __future__ import annotations
 
@@ -222,20 +222,25 @@ def main():
             print(f"[gw-base] {cp} missing — run gw_height first, skipping chm")
         else:
             c = np.load(cp)
-            chm, cx0, cy0, ccell = c["chm"], float(c["x0"]), float(c["y0"]), float(c["cell"])
+            chm = c["chm"]
+            cx0, cy0 = float(c["x0"]), float(c["y0"])
+            ccell = float(c["cell"])
             hj = json.loads((C.RESULTS / "geowalker_height.json").read_text()) \
                 if (C.RESULTS / "geowalker_height.json").exists() else {}
             min_h = float(os.environ.get("GW_CHM_MIN_H",
                                          hj.get("derived_cut_m", 2.0)))
-            i0 = max(0, int((bbox[0] - cx0) / ccell)); i1 = int((bbox[1] - cx0) / ccell) + 2
-            j0 = max(0, int((bbox[2] - cy0) / ccell)); j1 = int((bbox[3] - cy0) / ccell) + 2
+            i0 = max(0, int((bbox[0] - cx0) / ccell))
+            i1 = int((bbox[1] - cx0) / ccell) + 2
+            j0 = max(0, int((bbox[2] - cy0) / ccell))
+            j1 = int((bbox[3] - cy0) / ccell) + 2
             sub = chm[j0:j1, i0:i1]
             sm = ndimage.gaussian_filter(np.where(np.isfinite(sub), sub, 0.0),
                                          sigma=max(1.0, 0.3 / ccell))
             sm = np.where(np.isfinite(sub), sm, np.nan)
             xy, h = peaks(sm, ccell, CHM_SEP, min_h,
                           cx0 + i0 * ccell, cy0 + j0 * ccell)
-            print(f"[gw-base] chm >= {min_h:.1f} m, sep {CHM_SEP} m: {len(xy)} maxima")
+            print(f"[gw-base] chm >= {min_h:.1f} m, sep {CHM_SEP} m: "
+                  f"{len(xy)} maxima")
             if len(xy):
                 xyz = np.column_stack([xy, ground(xy)])
                 dets["chm"] = (xyz, h / max(h.max(), 1e-6))

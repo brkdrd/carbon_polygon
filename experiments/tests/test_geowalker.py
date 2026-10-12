@@ -604,6 +604,251 @@ def test_baseline_girth_parses_a_multi_stem():
     assert np.isnan(B.girth_to_dbh("n/a"))
 
 
+# ---------------------------------------------------------------------------
+# dense stem head (stemnet): everything except Sonata itself, on the CPU
+# ---------------------------------------------------------------------------
+def _toy_scene(tmp, rng, trunks=((0.0, 0.0), (6.0, 1.0), (2.0, 7.0))):
+    """A flat 20 x 20 m plot: vertical trunks, a ground plane, a low car.
+
+    Returns (SceneStore, Dem, bases) with the ground at z = 0 everywhere, so a
+    point's height above ground is just its z.
+    """
+    import stemnet as SN
+    parts = []
+    for cx, cy in trunks:
+        n = 3000
+        t = rng.uniform(0, 2 * np.pi, n)
+        r = 0.15 * np.sqrt(rng.uniform(0.5, 1.0, n))
+        parts.append(np.column_stack([cx + r * np.cos(t), cy + r * np.sin(t),
+                                      rng.uniform(0.0, 12.0, n)]))
+    n = 20000                                        # ground
+    parts.append(np.column_stack([rng.uniform(-10, 10, n),
+                                  rng.uniform(-10, 10, n),
+                                  rng.normal(0, 0.01, n)]))
+    n = 4000                                         # car, 1.4 m tall
+    parts.append(np.column_stack([rng.uniform(-9, -6, n),
+                                  rng.uniform(-9, -7, n),
+                                  rng.uniform(0, 1.4, n)]))
+    xyz = np.concatenate(parts).astype(np.float32)
+    nrm = np.zeros_like(xyz)
+    nrm[:, 2] = 1.0
+    dem_p = Path(tmp) / "dem.npz"
+    np.savez(dem_p, z=np.zeros((64, 64), np.float32), x0=-16.0, y0=-16.0,
+             cell=0.5)
+    scene = SN.SceneStore(xyz, nrm, device="cpu")
+    dem = SN.Dem(dem_p, device="cpu")
+    bases = np.array([[cx, cy, 0.0] for cx, cy in trunks])
+    return scene, dem, bases
+
+
+def test_stemnet_band_drops_the_ground_and_the_crown():
+    """The band is why one pass over the scene is affordable: if it does not
+    actually throw away the ground and the canopy, nothing else here holds."""
+    import tempfile
+    import stemnet as SN
+    rng = np.random.default_rng(0)
+    with tempfile.TemporaryDirectory() as tmp:
+        scene, dem, _b = _toy_scene(tmp, rng)
+        band = SN.Band(scene, dem, lo=0.3, hi=4.0, voxel=0.05)
+    z = band.xyz[:, 2]
+    assert z.min() >= 0.3 - 1e-6 and z.max() <= 4.0 + 1e-6, (z.min(), z.max())
+    assert len(band.xyz) < 0.5 * len(scene.xyz)          # most of it is gone
+    # dedup really deduped: no two kept points share a 0.05 m voxel
+    k = np.floor(band.xyz / 0.05).astype(np.int64)
+    assert len(np.unique(k, axis=0)) == len(k)
+
+
+def test_stemnet_windows_tile_the_scene_exactly_once():
+    """Inner squares partition the region: a point counted twice is a vote
+    counted twice, which would inflate every detection's confidence."""
+    import tempfile
+    import stemnet as SN
+    rng = np.random.default_rng(1)
+    with tempfile.TemporaryDirectory() as tmp:
+        scene, dem, _b = _toy_scene(tmp, rng)
+        band = SN.Band(scene, dem, lo=0.3, hi=4.0, voxel=0.05)
+    centres = SN.tile_centres(-10.0, 10.0, -10.0, 10.0, win=8.0)
+    seen = np.zeros(len(band.xyz), np.int64)
+    for cx, cy in centres:
+        pos, inner = band.window(cx, cy, win=8.0, pad=2.0)
+        if len(pos):
+            np.add.at(seen, pos[inner], 1)
+    inside = ((np.abs(band.xyz[:, 0]) <= 10.0) & (np.abs(band.xyz[:, 1]) <= 10.0))
+    assert seen[inside].min() == 1 and seen[inside].max() == 1, \
+        (seen[inside].min(), seen[inside].max())
+
+
+def test_stemnet_labels_are_horizontal_not_three_dimensional():
+    """A trunk point 3 m up is 3 m from its own base in 3-D and ~0.1 m from it
+    in plan view. Labelling in 3-D would mark the whole trunk a negative."""
+    import stemnet as SN
+    bases = torch.tensor([[0.0, 0.0]])
+    xy = torch.tensor([[0.1, 0.0],        # on the trunk, any height
+                       [0.9, 0.0],        # just inside NEAR_R
+                       [2.0, 0.0]])       # off the tree
+    pos, off = SN.targets(xy, bases, near_r=1.0)
+    assert pos.tolist() == [True, True, False]
+    assert torch.allclose(off[0], torch.tensor([-0.1, 0.0]), atol=1e-6)
+
+
+def test_stemnet_vote_recovers_stems_from_noisy_offsets():
+    """The detection machinery: p-weighted peaks of the shifted cloud. Dense
+    consensus is the whole premise, so the vote counts matter as much as the
+    positions."""
+    import stemnet as SN
+    rng = np.random.default_rng(2)
+    stems = np.array([[0.0, 0.0], [3.0, 0.0], [0.0, 2.5]])
+    xy, p, off = [], [], []
+    for s in stems:
+        n = 400
+        q = s + rng.normal(0, 0.12, (n, 2))          # points around the stem
+        xy.append(q)
+        p.append(np.full(n, 0.9))
+        off.append(s - q + rng.normal(0, 0.08, (n, 2)))   # noisy vote
+    n = 600                                           # confident-but-wrong noise
+    q = rng.uniform(-6, 6, (n, 2))
+    xy.append(q); p.append(np.full(n, 0.2)); off.append(rng.normal(0, 1.0, (n, 2)))
+    xy = np.concatenate(xy); p = np.concatenate(p); off = np.concatenate(off)
+
+    det, mass, nv = SN.vote(xy, p, off, p_thresh=0.5, min_mass=20.0)
+    assert len(det) == 3, (len(det), det)
+    for s in stems:
+        d = np.linalg.norm(det - s, axis=1).min()
+        assert d < 0.15, (s, d)
+    # this is the number the walker could not produce
+    assert nv.min() >= 100, nv
+
+
+def test_stemnet_head_learns_the_toy_task():
+    """Train the real head with the real loss on hand-made features, so the
+    optimisation wiring is exercised without Sonata: the features say where the
+    point sits inside a 0.4 m column, which is enough to solve the task."""
+    import stemnet as SN
+    rng = np.random.default_rng(3)
+    stems = np.array([[0.0, 0.0], [2.0, 0.0]])
+    n = 800
+    xy = np.concatenate([s + rng.normal(0, 0.1, (n, 2)) for s in stems]
+                        + [rng.uniform(-4, 4, (n, 2))])
+    d = np.linalg.norm(xy[:, None, :] - stems[None], axis=2)
+    j = d.argmin(1)
+    pos = d.min(1) <= 1.0
+    # feature: the point's own offset to its column centre, plus a bias. A
+    # linear head can solve this, which is the point -- we are testing the loss
+    # and the vote, not the representation.
+    feat = np.column_stack([np.where(pos, stems[j, 0] - xy[:, 0], 0.0),
+                            np.where(pos, stems[j, 1] - xy[:, 1], 0.0),
+                            pos.astype(np.float64), np.ones(len(xy))])
+    feat = torch.tensor(feat, dtype=torch.float32)
+    tgt_pos = torch.tensor(pos)
+    tgt_off = torch.tensor(stems[j] - xy, dtype=torch.float32)
+
+    torch.manual_seed(0)
+    head = SN.StemHead(feat.shape[1], d=32)
+    opt = torch.optim.AdamW(head.parameters(), lr=3e-3)
+    first = None
+    for _ in range(400):
+        logit, off = head(feat)
+        loss = (torch.nn.functional.binary_cross_entropy_with_logits(
+                    logit, tgt_pos.float())
+                + torch.nn.functional.smooth_l1_loss(off[tgt_pos],
+                                                     tgt_off[tgt_pos]))
+        first = float(loss) if first is None else first
+        opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
+    assert float(loss) < 0.3 * first, (first, float(loss))
+
+    with torch.no_grad():
+        logit, off = head(feat)
+    det, mass, nv = SN.vote(xy, torch.sigmoid(logit).numpy(), off.numpy(),
+                            p_thresh=0.5, min_mass=10.0)
+    assert len(det) == 2, (len(det), det)
+    for s in stems:
+        assert np.linalg.norm(det - s, axis=1).min() < 0.2, s
+
+
+class _FakePoint(dict):
+    """Just enough of Pointcept's Point for the upcast: a dict with attribute
+    access and an optional pooling chain."""
+
+    def __getattr__(self, k):
+        return self[k]
+
+    def __setattr__(self, k, v):
+        self[k] = v
+
+
+def test_stemnet_upcast_uses_the_chain_and_survives_its_absence():
+    """The one library detail this design leans on. If the pooling chain is
+    there the read-out is per point; if a build does not expose it, the stage
+    must still run on token-resolution features rather than crash."""
+    import stemnet as SN
+    want = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+                         [1.0, 1.0, 0.0]])
+
+    SN._UPCAST_NOTE.clear()
+    leaf = _FakePoint(feat=torch.zeros(4, 8), coord=want.clone())
+    coarse = _FakePoint(feat=torch.arange(2 * 16, dtype=torch.float32).view(2, 16),
+                        coord=want[:2].clone(),
+                        pooling_parent=leaf,
+                        pooling_inverse=torch.tensor([0, 0, 1, 1]))
+    f = SN.upcast(coarse, want)
+    assert f.shape == (4, 24), f.shape                  # 8 own + 16 upcast
+    assert torch.equal(f[0, 8:], f[1, 8:])              # same parent token
+    assert not torch.equal(f[0, 8:], f[2, 8:])
+    assert SN._UPCAST_NOTE == ["chain"]
+
+    SN._UPCAST_NOTE.clear()
+    lone = _FakePoint(feat=torch.tensor([[1.0, 2.0], [30.0, 40.0]]),
+                      coord=torch.tensor([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]))
+    f = SN.upcast(lone, want)
+    assert f.shape == (4, 2), f.shape
+    assert SN._UPCAST_NOTE == ["nn"]
+    assert torch.allclose(f[0], torch.tensor([1.0, 2.0]))     # nearest token
+    assert torch.allclose(f[3], torch.tensor([30.0, 40.0]))
+
+
+def test_stem_train_window_step_runs_end_to_end():
+    """The training plumbing on the toy scene with a stand-in encoder: band
+    indices -> crop -> features -> both losses -> gradients into the head.
+    Sonata is the only thing mocked, so a dtype or device slip in the real
+    stage shows up here instead of an hour into a GPU run."""
+    import tempfile
+    import stemnet as SN
+    import stem_train as T
+    rng = np.random.default_rng(4)
+    with tempfile.TemporaryDirectory() as tmp:
+        scene, dem, bases = _toy_scene(tmp, rng)
+        band = SN.Band(scene, dem, lo=0.3, hi=4.0, voxel=0.05)
+
+        def fake_encoder(data):
+            c = data["coord"]
+            return _FakePoint(coord=c, feat=torch.cat(
+                [c, c.abs(), torch.sin(c), data["feat"]], 1))
+
+        head = SN.StemHead(18, d=32)
+        opt = torch.optim.AdamW(head.parameters(), lr=1e-3)
+        bases_xy = torch.from_numpy(bases[:, :2].astype(np.float32))
+        centres = bases[:, :2]
+        hit = 0
+        for _ in range(6):
+            pos, inner, _c = T.window_batch(band, centres, rng)
+            if len(pos) < 64 or not inner.any():
+                continue
+            l_cls, l_off, n_pos, n_pts, pred = T.forward_window(
+                fake_encoder, head, scene, band, pos, inner, bases_xy,
+                train=True)
+            loss = l_cls + l_off
+            assert torch.isfinite(loss), loss
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            g = head.logit.weight.grad
+            assert g is not None and torch.isfinite(g).all()
+            opt.step()
+            assert n_pos > 0 and n_pts >= 64, (n_pos, n_pts)
+            assert pred[0].shape[0] == n_pts and pred[2].shape == (n_pts, 2)
+            hit += 1
+        assert hit >= 4, hit
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

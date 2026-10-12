@@ -351,6 +351,10 @@ One stage at a time (same target names in both launchers):
 | `gw_diag` | why recall is what it is (walk / NMS / threshold) | GPU, ~minutes |
 | `gw_infer_patch` | inference restricted to the densely attributed survey patch — 392 trees, 25 species, girth on 388, ~1.14 ha. Writes a per-tree answer sheet and a per-species recall. **These are training labels**, and the stage says so | GPU, ~1.6 h (2.9k seeds) |
 | `gw_baseline` | the control: classical training-free detection on the same patch, scored by the same matcher — breast-height density peaks confirmed by a vertical column, and CHM local maxima. Says whether the network is beating a 1990s algorithm | CPU, ~minutes |
+| `gw_stem_train` | train the dense stem head on the frozen encoder — per point, tree-or-not plus the horizontal offset to its base | GPU, ~minutes to an hour |
+| `gw_stem_infer` | dense stem inference on the **held-out val block** — one encoder pass per window, every point votes | GPU, ~minutes |
+| `gw_stem_patch` | the same on the attributed patch, with the per-tree answer sheet and recall by stem size | GPU, ~minutes |
+| `gw_stem` | all three in order | GPU |
 | `gw_height` | canopy height vs the annotators' criterion | CPU, ~minutes |
 | `gw_head` | can the tree/not-tree decision be trained on its own? | GPU, walk-bound; resumable |
 
@@ -532,6 +536,71 @@ Both walk a frozen-Sonata sphere toward a tree base; the difference is what
 
 They share the scene, the split and the metric, so their numbers are directly
 comparable — `10_/11_` images are BaseWalker's, `20_/21_/22_` are GeoWalker's.
+
+
+## Dense stem head (one pass, every point votes)
+
+The walker's own measurement is what motivated this. On the attributed patch it
+missed 305 of 522 trees at 0.5 m, but **94% of those misses had a detection
+cluster within 2 m** and 143 of them within a single metre — and the median
+cluster carried **one vote** out of the ~5 walkers that passed near each tree.
+Eight sequential sphere encodes buy one opinion about one trajectory. The
+information needed to place a stem is already in the points standing around it.
+
+So the same frozen Sonata encoder is read **densely** instead:
+
+* the coarse tokens are upcast back to the input points through the pooling
+  chain (the standard Sonata linear-probe read-out; `stemnet.upcast` falls back
+  to nearest-token features and says so if a build does not expose the chain);
+* two heads per point — a logit for *this point belongs to a tree stem*, and a
+  **2-D horizontal** offset to that stem's base;
+* detections are peaks in the confidence-weighted histogram of the **shifted**
+  points. A detection's score is the vote mass that agreed on it, so consensus
+  is dense by construction.
+
+**Why those two targets.** The only per-tree truth in this project is a set of
+RTK stem bases — no per-point instance or semantic labels exist for this cloud.
+So "is a tree" is defined as *within `GW_SN_NEAR_R` metres **horizontally** of a
+surveyed base*, which inside the breast-height band is a trunk and its
+immediate surroundings. Narrower than tree/not-tree, and it is what the data can
+actually supervise. Horizontal because a trunk point 3 m up is 3 m from its base
+in 3-D but ~0.15 m from it in plan view; the base's z comes from the DEM, so the
+head never predicts it and the target is a short, low-variance 2-D vector
+instead of the walker's 8 m trajectory.
+
+**Why it is cheap.** Only the `GW_SN_BAND_LO`..`GW_SN_BAND_HI` slice above the
+DEM is ever encoded — the ground carries no stem and the crown cannot say where
+a trunk meets the soil — and that slice is voxel-deduplicated at `GW_SN_VOXEL`,
+which is lossless as far as an encoder that serialises on a 0.05 m lattice is
+concerned. One pass per window over ~5-10% of the points replaces 9 encodes per
+2 m seed. The stage prints its own ha/h next to the walker's 1.35 h/ha.
+
+```bash
+./run_experiments.sh gw_stem            # train, then val, then patch
+./run_experiments.sh gw_stem_infer      # the held-out score, on its own
+```
+
+| file | what it holds |
+| --- | --- |
+| `data/models/geowalker_stemnet.pth` | best-val-F1 head (+ `_last.pth`) |
+| `results/geowalker_stem_val_metrics.json` | the honest score: P/R/F1/RMSE at 0.5 m and 1.0 m, threshold sweep, ha/h |
+| `results/geowalker_stem_val_detections.csv` | `x,y,z,score,n_votes` |
+| `results/geowalker_stem_patch_trees.csv` | same columns as `geowalker_patch_trees.csv`, so the walker and the head diff line for line |
+| `results/23_geowalker_stem_val.png` | detections, and the vote cloud beside them |
+
+Training windows are centred on train bases and never allowed to reach across
+the leakage margin into the val block; validation during training is the **full
+detection metric** (vote, cluster, match) on a fixed sample of val windows, and
+only the best-F1 head is checkpointed. Resumes by default (`GW_SN_RESUME=0`
+starts cold); `GW_SN_ITERS` counts *this* run.
+
+Knobs: `GW_SN_WIN` (16 m predicted square), `GW_SN_PAD` (2 m context ring,
+encoded but not predicted on, so inner squares tile exactly and no point votes
+twice), `GW_SN_BAND_LO/HI` (0.3/4.0 m), `GW_SN_NEAR_R` (1.0 m), `GW_SN_VOXEL`
+(0.05 m), `GW_SN_PTS` (250k per pass), `GW_SN_P` (0.5, a point votes above
+this), `GW_SN_VOTE_CELL/SEP/R/MIN` (0.1 / 0.6 / 0.3 / 6.0), `GW_SN_ITERS`,
+`GW_SN_LR`, `GW_SN_W_OFF`, `GW_SN_EVAL`, `GW_SN_EVAL_WIN`.
+
 
 ## Notes & caveats
 

@@ -184,6 +184,25 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/geowalker/height.py"]
 
+  # Dense stem head on the frozen encoder: per point, is this a tree and where
+  # is its base. One pass per window instead of 9 encodes per seed, and every
+  # point votes -- the walker's median detection had ONE vote.
+  geowalker_stem_train:
+    <<: *gpu
+    image: carbonpoly/geowalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/geowalker/stem_train.py"]
+
+  geowalker_stem_infer:
+    <<: *gpu
+    image: carbonpoly/geowalker
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/geowalker/stem_infer.py"]
+
   # the control: classical, training-free tree detection on the same ground,
   # scored by the same matcher. CPU, minutes. Answers "is the network actually
   # beating a density peak and a canopy local maximum?" -- which nothing in this
