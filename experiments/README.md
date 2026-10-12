@@ -597,13 +597,14 @@ and unaffected, and the band starts at 0.3 m so there is little ground left to
 disagree about.) A head trained one way refuses to run the other way rather than
 be fed a z convention it never learned.
 
-Both stages print the terrain before they do anything:
+Both stages print the terrain before they do anything (shape of the output —
+the actual numbers for this scene have not been measured yet):
 
 ```
-[sn] relief: the scene spans 48.2 m of ground elevation | within one 20 m crop,
-     p50 1.4 m p95 6.1 m max 11.3 m
-[sn] DEM vs 392 surveyed elevations (datum offset -0.11 m removed):
-     IQR 0.18 m | p5 -0.37 p95 +0.41 m | 4% beyond 0.5 m
+[sn] relief: the scene spans NN.N m of ground elevation | within one 20 m crop,
+     p50 N.N m p95 N.N m max NN.N m
+[sn] DEM vs 392 surveyed elevations (datum offset -N.NN m removed):
+     IQR N.NN m | p5 -N.NN p95 +N.NN m | N% beyond 0.5 m
 ```
 
 The second line is the one that can invalidate everything downstream: the band,
