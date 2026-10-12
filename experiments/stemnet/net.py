@@ -79,7 +79,14 @@ BAND_HI = float(os.environ.get("SN_BAND_HI", "4.0"))
 NEAR_R = float(os.environ.get("SN_NEAR_R", "1.0"))     # positive-label radius
 WIN = float(os.environ.get("SN_WIN", "16.0"))          # predicted square, m
 PAD = float(os.environ.get("SN_PAD", "2.0"))           # encoded context ring
-PTS_CAP = int(float(os.environ.get("SN_PTS", "250000")))
+# The crop point cap — a MEMORY knob, not a modelling one. Stage-1 attention
+# materialises an (N/K, heads, K, K) tensor, i.e. N x heads x patch_size
+# floats, and it exists twice while its softmax runs: ~25 kB of device memory
+# per crop point, on top of the band, the frozen encoder and the head's
+# retained activations. A typical crop on this scene is ~150 k points, so this
+# sits just above it: ordinary windows pass through untouched and only a
+# thicket gets subsampled.
+PTS_CAP = int(float(os.environ.get("SN_PTS", "160000")))
 P_THRESH = float(os.environ.get("SN_P", "0.5"))        # a point votes above this
 VOTE_CELL = float(os.environ.get("SN_VOTE_CELL", "0.1"))
 VOTE_SEP = float(os.environ.get("SN_VOTE_SEP", "0.6"))  # two stems this far apart
@@ -205,80 +212,161 @@ def voxel_unique(xyz: np.ndarray, voxel: float) -> np.ndarray:
 
 
 class Chunk:
-    """The scene as a flat chunk of points on the device.
+    """A flat set of points on the device: xyz, normals, nothing else.
 
     Deliberately NOT a spatial store with a ball index: this model never asks
     "what is within r of this moving point". It asks for a rectangle once per
     window, which `Band`'s bucket index answers on the CPU, and after that the
     points are just rows.
+
+    What lives here is the BAND, not the scene. `Band` builds this, and builds
+    it from band points only. The full cloud is 267 M points — 6.4 GB of xyz
+    plus normals — and 83% of it is below 0.3 m or above 4.0 m and is never
+    read again once the band is selected. Keeping it resident cost more of the
+    card than the encoder, the dense read-out and the head's activations put
+    together, which is what made training die partway through a run.
     """
 
     def __init__(self, xyz: np.ndarray, normal: np.ndarray, device="cuda"):
         self.device = device
-        self.xyz = torch.from_numpy(xyz.astype(np.float32)).to(device)
-        self.normal = torch.from_numpy(normal.astype(np.float32)).to(device)
+        self.xyz = torch.from_numpy(
+            np.ascontiguousarray(xyz, np.float32)).to(device)
+        self.normal = torch.from_numpy(
+            np.ascontiguousarray(normal, np.float32)).to(device)
+
+    def __len__(self):
+        return len(self.xyz)
 
 
-def load_chunk(tiles_dir=None, device=DEVICE):
-    tiles_dir = Path(tiles_dir or PREP / "tiles")
-    xs, ns = [], []
-    for q in sorted(tiles_dir.glob("tile_*.npz")):
-        d = np.load(q)
-        xs.append(d["xyz"].astype(np.float32))
-        ns.append(d["normal"].astype(np.float32))
-    if not xs:
-        raise SystemExit(f"[sn] no tiles in {tiles_dir} — run bw_prep first")
-    xyz, normal = np.concatenate(xs), np.concatenate(ns)
-    print(f"[sn] chunk: {len(xyz):,} pts from {len(xs)} tiles")
-    return Chunk(xyz, normal, device=device)
+def _point_source(src, pattern="tile_*.npz"):
+    """Yield (xyz, normal) host arrays from whatever the caller has.
+
+    A directory is yielded ONE TILE AT A TIME and never concatenated, so the
+    whole cloud is never materialised — not on the card and not in host RAM.
+    `Band` is about to discard five sixths of it, and this is the only reason
+    it can afford to look at all of it.
+    """
+    if isinstance(src, Chunk):           # a cloud already resident (tests)
+        yield src.xyz.cpu().numpy(), src.normal.cpu().numpy()
+        return
+    if isinstance(src, (str, Path)):
+        qs = sorted(Path(src).glob(pattern))
+        if not qs:
+            raise SystemExit(f"[sn] no tiles in {src} — run bw_prep first")
+        for q in qs:
+            d = np.load(q)
+            yield d["xyz"].astype(np.float32), d["normal"].astype(np.float32)
+        return
+    xyz, normal = src
+    yield np.asarray(xyz, np.float32), np.asarray(normal, np.float32)
+
+
+def gpu_report(tag=""):
+    """What the card is holding. Printed, never inferred.
+
+    An exhausted card does not always announce itself as a clean
+    torch.OutOfMemoryError here: this image runs spconv-cu126 on sm_120 through
+    its NVRTC fallback, and a workspace allocation that fails inside those
+    kernels surfaces as `CUDA error: an illegal memory access was encountered`
+    at the next device sync, several frames away from the real cause. So the
+    high-water mark gets printed, and a run that dies at iteration 159 says why.
+    """
+    dev = str(DEVICE)
+    if not (dev.startswith("cuda") and torch.cuda.is_available()):
+        return {}
+    free, total = torch.cuda.mem_get_info()
+    out = dict(total_gb=total / 2 ** 30, free_gb=free / 2 ** 30,
+               held_gb=torch.cuda.memory_allocated() / 2 ** 30,
+               peak_gb=torch.cuda.max_memory_allocated() / 2 ** 30)
+    print(f"[sn] gpu{tag}: {out['held_gb']:.2f} GB held, peak "
+          f"{out['peak_gb']:.2f} GB, {out['free_gb']:.2f} of "
+          f"{out['total_gb']:.2f} GB free", flush=True)
+    return out
 
 
 class Band:
-    """The breast-height slice of the chunk, deduplicated and indexed.
+    """The breast-height slice of the scene — deduplicated, indexed, and the
+    only points that are ever uploaded.
 
     Everything outside it is dropped before the model ever runs: the ground
     carries no stem, the crown cannot say where a trunk meets the soil, and
     together they are most of the cloud. This is why one pass over the scene is
     affordable where 199,278 sphere encodes were not.
+
+    `src` is normally the tiles directory, which is streamed a tile at a time —
+    the selection happens on the way in, so the 83% of the scene that the band
+    rejects never reaches the device at all. A `Chunk` or a plain (xyz, normal)
+    pair is also accepted, for a cloud small enough to hold whole.
+
+    After construction, a band position IS a device row: `self.xyz[i]` (host,
+    float64, for the rectangle maths) and `self.chunk.xyz[i]` (device, float32,
+    for the encoder) are the same point. There is no index translation left to
+    get wrong.
     """
 
-    def __init__(self, chunk: Chunk, dem: Dem, lo=BAND_LO, hi=BAND_HI,
-                 voxel=VOXEL, cell=None, block=1 << 20):
-        xyz = chunk.xyz
-        keep, hs = [], []
-        for s in range(0, len(xyz), block):
-            blk = xyz[s:s + block]
-            h = blk[:, 2] - dem.height(blk[:, :2])
-            k = torch.nonzero((h >= lo) & (h <= hi), as_tuple=True)[0]
-            keep.append(k + s)
-            hs.append(h[k])
-        if keep:
-            keep, hs = torch.cat(keep), torch.cat(hs)
-        else:
-            keep = torch.zeros(0, dtype=torch.long, device=xyz.device)
-            hs = torch.zeros(0, device=xyz.device)
-        pts = xyz[keep].double().cpu().numpy()
-        u = voxel_unique(pts, voxel)
-        ut = torch.as_tensor(u, device=xyz.device)
-        self.idx = keep[ut]
+    def __init__(self, src, dem: Dem, lo=BAND_LO, hi=BAND_HI, voxel=VOXEL,
+                 cell=None, device=None, block=1 << 20):
+        if device is None:
+            device = src.device if isinstance(src, Chunk) else DEVICE
+        xs, ns, hs = [], [], []
+        n_src = n_raw = n_part = 0
+        for xyz, normal in _point_source(src):
+            n_src += len(xyz)
+            n_part += 1
+            for s in range(0, len(xyz), block):
+                bx = xyz[s:s + block]
+                t = torch.from_numpy(np.ascontiguousarray(bx)).to(device)
+                h = t[:, 2] - dem.height(t[:, :2])
+                k = torch.nonzero((h >= lo) & (h <= hi), as_tuple=True)[0]
+                if not len(k):
+                    continue
+                kc = k.cpu().numpy()
+                xs.append(bx[kc])
+                ns.append(normal[s:s + block][kc])
+                hs.append(h[k].cpu().numpy())
+                n_raw += len(kc)
+                del t, h, k
+        if not xs:
+            raise SystemExit(f"[sn] nothing between {lo} and {hi} m above the "
+                             f"DEM — the band is empty, so the DEM is wrong")
+        xyz_b, nrm_b = np.concatenate(xs), np.concatenate(ns)
+        h_b = np.concatenate(hs)
+        del xs, ns, hs
+        # the dedup key in float64, on the HOST: at this scene's scale a float32
+        # coordinate quantises to ~2e-5 m, enough to flip which side of a voxel
+        # wall a point falls on, and doing it here means no float64 copy of the
+        # band (1.5 GB of it) is ever made on the card.
+        u = voxel_unique(xyz_b.astype(np.float64), voxel)
+        self.xyz = xyz_b[u].astype(np.float64)
+        self.h = h_b[u].astype(np.float64)
+        self.chunk = Chunk(xyz_b[u], nrm_b[u], device=device)
         # height above ground, kept rather than recomputed: it selects the band
         # AND it is the z the encoder is given, so the two can never disagree
-        self.h_t = hs[ut]
-        self.h = self.h_t.double().cpu().numpy()
-        self.xyz = pts[u]
-        self.n_raw = int(len(keep))
+        self.h_t = torch.from_numpy(self.h.astype(np.float32)).to(device)
+        self.device = device
+        self.n_src = int(n_src)
+        self.n_raw = int(n_raw)
         self.buckets = Buckets(self.xyz[:, :2], cell or max(WIN / 2.0, 1.0))
-        print(f"[sn] band {lo}-{hi} m: {len(xyz):,} chunk pts -> "
-              f"{self.n_raw:,} in band -> {len(self.xyz):,} after {voxel} m "
-              f"dedup ({len(self.xyz)/max(len(xyz),1)*100:.1f}% of the chunk)")
+        mb = (self.chunk.xyz.numel() + self.chunk.normal.numel()
+              + self.h_t.numel()) * 4 / 2 ** 20
+        print(f"[sn] band {lo}-{hi} m: {n_src:,} scene pts from {n_part} "
+              f"tiles -> {self.n_raw:,} in band -> {len(self.xyz):,} after "
+              f"{voxel} m dedup "
+              f"({len(self.xyz)/max(n_src,1)*100:.1f}% of the scene)")
+        print(f"[sn] on device: the band alone, {mb:,.1f} MB — the other "
+              f"{n_src - len(self.xyz):,} points were never uploaded")
         print(f"[sn] encoder z: "
               + ("HEIGHT ABOVE GROUND (detrended)" if DETREND else
                  "RAW z — SN_DETREND=0, so relief is inside every crop"))
 
+    def __len__(self):
+        return len(self.xyz)
+
     def crop(self, pos):
-        """(chunk indices, ground-relative z) for the band positions `pos`."""
-        t = torch.as_tensor(pos, device=self.idx.device)
-        return self.idx[t], (self.h_t[t] if DETREND else None)
+        """(device rows into self.chunk, ground-relative z) for band positions."""
+        t = torch.as_tensor(np.ascontiguousarray(pos, np.int64),
+                            device=self.device)
+        return t, (self.h_t[t] if DETREND else None)
 
     def window(self, cx, cy, win=WIN, pad=PAD):
         """(crop positions, inner mask) for the square centred at (cx, cy).

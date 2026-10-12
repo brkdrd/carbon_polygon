@@ -230,7 +230,8 @@ services:
     <<: *gpu
     image: carbonpoly/stemnet
     env_file: [.env]
-    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results,
+                     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet/train.py"]
 
@@ -238,7 +239,8 @@ services:
     <<: *gpu
     image: carbonpoly/stemnet
     env_file: [.env]
-    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results,
+                     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet/infer.py"]
 

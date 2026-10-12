@@ -46,10 +46,10 @@ REGION = os.environ.get("SN_REGION", "val")
 PROGRESS_S = float(os.environ.get("SN_PROGRESS_S", "30"))
 
 
-def run_region(enc, head, chunk, band, centres):
+def run_region(enc, head, band, centres):
     """Every window's inner points, with p and predicted offset."""
     xs, ps, os_, t0, last = [], [], [], time.time(), time.time()
-    n_enc = 0
+    n_enc = n_sub = 0
     for k, (cx, cy) in enumerate(centres):
         pos, inner = band.window(cx, cy)
         if len(pos) < 64 or not inner.any():
@@ -57,19 +57,19 @@ def run_region(enc, head, chunk, band, centres):
         if len(pos) > S.PTS_CAP:
             # subsample, never truncate: `pos` is in bucket order, so a slice
             # would drop one spatial corner of the window and every tree in it
-            print(f"[sn] window {k} has {len(pos):,} pts > SN_PTS "
-                  f"({S.PTS_CAP:,}) — subsampling; raise SN_VOXEL to keep "
-                  f"the whole window", flush=True)
+            n_sub += 1
             sel = np.random.default_rng(k).permutation(len(pos))[:S.PTS_CAP]
             pos, inner = pos[sel], inner[sel]
         idx, zcol = band.crop(pos)
         with torch.no_grad():
-            feat = S.encode_points(enc, chunk, idx, zcol)
-            logit, off = head(feat)
-        m = torch.as_tensor(inner, device=chunk.device)
-        xs.append(chunk.xyz[idx][m][:, :2].cpu().numpy())
-        ps.append(torch.sigmoid(logit[m]).cpu().numpy())
-        os_.append(off[m].cpu().numpy())
+            feat = S.encode_points(enc, band.chunk, idx, zcol)
+            # the pad ring is context for the encoder and nothing else; the head
+            # never runs on it, which is 36% of a 20 m crop it does not have to
+            m = torch.as_tensor(inner, device=band.device)
+            logit, off = head(feat[m])
+        xs.append(band.chunk.xyz[idx][m][:, :2].cpu().numpy())
+        ps.append(torch.sigmoid(logit).cpu().numpy())
+        os_.append(off.cpu().numpy())
         n_enc += 1
         if PROGRESS_S and time.time() - last > PROGRESS_S:
             last = time.time()
@@ -79,6 +79,11 @@ def run_region(enc, head, chunk, band, centres):
                   flush=True)
     if not xs:
         raise SystemExit("[sn] no window held any band points")
+    if n_sub:
+        print(f"[sn] {n_sub}/{n_enc} windows were denser than SN_PTS "
+              f"({S.PTS_CAP:,}) and were subsampled — raise SN_VOXEL to thin "
+              f"them evenly instead", flush=True)
+    S.gpu_report(" high-water")
     return (np.concatenate(xs), np.concatenate(ps), np.concatenate(os_),
             n_enc, time.time() - t0)
 
@@ -208,10 +213,10 @@ def main():
               f"{info['frac_gt_in_train']*100:.0f}% of its GT was trained on. "
               f"This is a ceiling, not a score — read region=val for that.")
 
-    chunk = S.load_chunk(device=dev)
     dem = S.Dem(S.PREP / "dem.npz", device=dev)
     terrain = dict(relief=S.relief(), dem_vs_survey=S.dem_check(dem, device=dev))
-    band = S.Band(chunk, dem)
+    # streamed tile by tile: only the band is ever uploaded
+    band = S.Band(S.PREP / "tiles", dem, device=dev)
     enc = S.load_encoder(device=dev)
 
     ck = torch.load(S.CKPT, map_location=dev, weights_only=False)
@@ -228,7 +233,7 @@ def main():
             f"different z convention than it learned. Set SN_DETREND="
             f"{int(bool(trained_detrend))} or retrain.")
 
-    xy, p, off, n_enc, secs = run_region(enc, head, chunk, band, centres)
+    xy, p, off, n_enc, secs = run_region(enc, head, band, centres)
     print(f"[sn] {len(xy):,} inner band points | "
           f"{int((p>=S.P_THRESH).sum()):,} above p={S.P_THRESH} "
           f"({(p>=S.P_THRESH).mean()*100:.1f}%)")

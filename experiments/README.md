@@ -624,6 +624,40 @@ which is lossless as far as an encoder that serialises on a 0.05 m lattice is
 concerned. One pass per window over ~5-10% of the points replaces 9 encodes per
 2 m seed. The stage prints its own ha/h next to the walker's 1.35 h/ha.
 
+**What fits on the card.** This is the constraint that decides `SN_WIN` and
+`SN_PTS`, so both stages print their memory rather than leaving it to be
+inferred. Only the **band** is ever uploaded: the scene is streamed tile by
+tile, points outside `SN_BAND_LO`..`SN_BAND_HI` are dropped on the way in, and
+the 83% of the cloud that the band rejects never reaches the device. Keeping
+the full 267 M-point cloud resident cost 6.4 GB — more than the encoder, the
+dense read-out and the head's activations put together.
+
+The per-crop cost is dominated by stage-1 attention, which materialises
+`N x heads x patch_size` floats and holds two copies while its softmax runs:
+about **25 kB of device memory per crop point**, plus ~5 kB for the 1232-d
+read-out and ~10 kB for the head's retained activations. A 20 m crop on this
+scene is ~150 k points, so:
+
+| crop points | peak above the band | note |
+| --- | --- | --- |
+| 80 k | ~3.1 GB | sparse window |
+| 160 k | ~6.2 GB | `SN_PTS` default, just above typical |
+| 250 k | ~9.6 GB | the old default; needed 16.5 GB all-in and did not fit |
+
+A window denser than `SN_PTS` is **subsampled, never truncated** (`pos` is in
+bucket order, so a slice would drop one spatial corner and every tree in it);
+raising `SN_VOXEL` thins dense windows evenly instead and is the better lever
+if many of them are being subsampled. Training survives an exhausted card: the
+window is retried at half the crop and, failing that, skipped and counted, so
+one thicket cannot kill a 4,000-iteration run.
+
+One trap worth knowing, because it does not announce itself: this image runs
+`spconv-cu126` on sm_120 through its NVRTC fallback, and an allocation that
+fails inside those kernels surfaces as `CUDA error: an illegal memory access
+was encountered` at the next device sync — several frames away from the real
+cause, and reported from Sonata's attention rather than from the allocator. If
+you see that, read the `[sn] gpu ...` high-water line, not the traceback.
+
 ```bash
 ./run_experiments.sh stemnet        # test, train, val, patch
 ./run_experiments.sh stem_infer     # the held-out score, on its own
@@ -647,7 +681,7 @@ cold); `SN_ITERS` counts *this* run.
 Knobs: `SN_WIN` (16 m predicted square), `SN_PAD` (2 m context ring,
 encoded but not predicted on, so inner squares tile exactly and no point votes
 twice), `SN_BAND_LO/HI` (0.3/4.0 m), `SN_NEAR_R` (1.0 m), `SN_VOXEL`
-(0.05 m), `SN_PTS` (250k per pass), `SN_P` (0.5, a point votes above
+(0.05 m), `SN_PTS` (160k per crop, a memory bound — see below), `SN_P` (0.5, a point votes above
 this), `SN_VOTE_CELL/SEP/R/MIN` (0.1 / 0.6 / 0.3 / 6.0), `SN_DETREND` (1),
 `SN_ITERS`,
 `SN_LR`, `SN_W_OFF`, `SN_EVAL`, `SN_EVAL_WIN`.

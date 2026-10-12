@@ -76,6 +76,37 @@ def test_stemnet_band_drops_the_ground_and_the_crown():
     assert len(np.unique(k, axis=0)) == len(k)
 
 
+def test_only_the_band_is_resident_on_the_device():
+    """The regression this guards killed a training run at iteration 159.
+
+    `Band` used to index into a Chunk holding the WHOLE cloud — 267 M points,
+    6.4 GB of xyz plus normals — of which it reads 17% and never touches the
+    rest again. That dead weight was more of the card than the encoder, the
+    dense read-out and the head's activations combined, so a denser-than-usual
+    window had nowhere to go. What is uploaded must be the band and only the
+    band, and a band position must BE a device row, or the two could diverge.
+    """
+    import tempfile
+    import net as SN
+    rng = np.random.default_rng(3)
+    with tempfile.TemporaryDirectory() as tmp:
+        chunk, dem, _b = _toy_scene(tmp, rng)
+        band = SN.Band(chunk, dem, lo=0.3, hi=4.0, voxel=0.05)
+
+        # resident == the band, not the source
+        assert len(band.chunk) == len(band.xyz) < 0.5 * len(chunk.xyz)
+        # host float64 row i and device float32 row i are the same point
+        dev = band.chunk.xyz.cpu().numpy()
+        assert np.abs(dev - band.xyz).max() < 1e-2, np.abs(dev - band.xyz).max()
+        # and crop() hands back rows of THAT, not of the source cloud
+        pos = np.array([0, 5, len(band.xyz) - 1], np.int64)
+        idx, zcol = band.crop(pos)
+        got = band.chunk.xyz[idx].cpu().numpy()
+        assert np.abs(got - band.xyz[pos]).max() < 1e-2
+        assert zcol is None or np.abs(
+            zcol.cpu().numpy() - band.h[pos]).max() < 1e-3
+
+
 def test_stemnet_windows_tile_the_scene_exactly_once():
     """Inner squares partition the region: a point counted twice is a vote
     counted twice, which would inflate every detection's confidence."""
@@ -252,8 +283,7 @@ def test_stem_train_window_step_runs_end_to_end():
             if len(pos) < 64 or not inner.any():
                 continue
             l_cls, l_off, n_pos, n_pts, pred = T.forward_window(
-                fake_encoder, head, chunk, band, pos, inner, bases_xy,
-                train=True)
+                fake_encoder, head, band, pos, inner, bases_xy, train=True)
             loss = l_cls + l_off
             assert torch.isfinite(loss), loss
             opt.zero_grad(set_to_none=True)
@@ -331,9 +361,56 @@ def test_detrending_makes_two_trunks_at_different_elevations_identical():
         for cx, cy in trunks:
             pos, inner = band.window(cx, cy, win=4.0, pad=0.0)
             idx, _ = band.crop(pos[inner])
-            raw.append(float(chunk.xyz[idx][:, 2].min()))
+            raw.append(float(band.chunk.xyz[idx][:, 2].min()))
         assert abs(raw[0] - raw[1]) > 3.0, \
             f"the toy slope is too gentle to be testing anything: {raw}"
+
+
+def test_oom_retry_halves_the_crop_but_never_hides_a_real_bug():
+    """What a 4,000-iteration run is allowed to survive, and what it is not.
+
+    A window twice as dense as the rest may be retried smaller and, failing
+    that, skipped — that is what SN_PTS already does. An `illegal memory
+    access` is also a RuntimeError, but the CUDA context is dead by then and
+    retrying it would turn a hard failure into a silently thinner run, so it
+    has to propagate.
+    """
+    import train as T
+    rng = np.random.default_rng(0)
+    pos, inner = np.arange(1000), np.ones(1000, bool)
+
+    seen = []
+
+    def real_bug(p, _i):
+        seen.append(len(p))
+        raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    try:
+        T.oom_retry(real_bug, pos, inner, rng)
+        raise AssertionError("a real bug was swallowed as an OOM")
+    except RuntimeError as e:
+        assert "illegal memory access" in str(e)
+    assert seen == [1000], seen          # not retried even once
+
+    seen.clear()
+
+    def dense_window(p, _i):
+        seen.append(len(p))
+        if len(p) > 600:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory.")
+        return "ok"
+
+    assert T.oom_retry(dense_window, pos, inner, rng) == "ok"
+    assert seen == [1000, 500], seen
+
+    seen.clear()
+
+    def hopeless(p, _i):
+        seen.append(len(p))
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory.")
+
+    assert T.oom_retry(hopeless, pos, inner, rng) is None
+    assert seen == [1000, 500], seen
 
 
 def test_relief_reports_what_sits_inside_one_crop():
