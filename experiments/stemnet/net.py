@@ -400,6 +400,22 @@ def relief(dem_npz=None, win=WIN, pad=PAD):
     """
     d = np.load(dem_npz or PREP / "dem.npz", allow_pickle=True)
     z, cell = d["z"].astype(np.float64), float(d["cell"])
+    # which ground filter actually ran: prep falls back to a per-cell 5th
+    # percentile if CSF is missing (its install is `|| true`), and that
+    # fallback does not classify ground at all — under closed canopy it sits
+    # in the understory, which lifts the DEM and slides the band off the stems
+    meth = str(d["method"]) if "method" in d.files else "unrecorded"
+    note = {"csf": "  (cloth simulation filter, Zhang et al.)",
+            "percentile": "  <-- NOT the cloth filter: CSF was unavailable at "
+                          "prep time and this is the per-cell 5th-percentile "
+                          "fallback, which does not classify ground at all",
+            "unrecorded": "  (no method recorded in dem.npz)"}.get(meth, "")
+    print(f"[sn] ground filter: {meth}{note}")
+    if "valid" in d.files:
+        v = d["valid"]
+        print(f"[sn] DEM cells with OBSERVED ground: {v.mean()*100:.1f}% — the "
+              f"rest are nan-filled by dilation, and Dem.height cannot tell "
+              f"you which is which")
     ok = np.isfinite(z)
     if not ok.any():
         print("[sn] DEM is empty — cannot report relief")
@@ -411,7 +427,10 @@ def relief(dem_npz=None, win=WIN, pad=PAD):
     lo = ndimage.minimum_filter(np.where(ok, z, np.inf), size=k, mode="nearest")
     span = np.where(ok, hi - lo, np.nan)
     span = span[np.isfinite(span)]
-    out = dict(scene_relief_m=float(np.nanmax(f) - np.nanmin(f)),
+    out = dict(ground_filter=meth,
+               frac_observed_ground=(float(d["valid"].mean())
+                                     if "valid" in d.files else None),
+               scene_relief_m=float(np.nanmax(f) - np.nanmin(f)),
                crop_span_p50_m=float(np.percentile(span, 50)) if len(span) else float("nan"),
                crop_span_p95_m=float(np.percentile(span, 95)) if len(span) else float("nan"),
                crop_span_max_m=float(span.max()) if len(span) else float("nan"),
