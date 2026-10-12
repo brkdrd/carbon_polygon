@@ -57,7 +57,10 @@ from scipy import ndimage
 
 sys.path[:0] = [str(Path(__file__).resolve().parent), "/app"]
 from common import config as C  # noqa: E402
-from walker import match_metrics, match_pairs  # noqa: E402
+from common import patch as P  # noqa: E402
+from common.detect import match_metrics, match_pairs  # noqa: E402
+from common.patch import girth_to_dbh  # noqa: E402,F401
+from common.raster import peaks  # noqa: E402
 
 BW = C.DATA / "basewalker"
 GW = C.DATA / "geowalker"
@@ -96,20 +99,6 @@ class Ground:
         return self.z[j, i]
 
 
-def peaks(raster, cell, sep, min_val, x0, y0):
-    """Local maxima of a raster, at least `sep` metres apart.
-
-    Ties inside a flat plateau would both survive a bare equality test, so the
-    maximum filter is compared against a copy whose plateaus are broken by a
-    tiny deterministic ramp.
-    """
-    r = max(1, int(round(sep / cell)))
-    a = np.where(np.isfinite(raster), raster, -np.inf).astype(np.float64)
-    a = a + np.linspace(0, 1e-6, a.size).reshape(a.shape)
-    mx = ndimage.maximum_filter(a, size=2 * r + 1, mode="nearest")
-    jj, ii = np.nonzero((a == mx) & (raster >= min_val) & np.isfinite(raster))
-    xy = np.column_stack([x0 + (ii + 0.5) * cell, y0 + (jj + 0.5) * cell])
-    return xy, raster[jj, ii].astype(np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -177,8 +166,6 @@ def detect_stems(bbox, ground, tiles):
 
 # ---------------------------------------------------------------------------
 def main():
-    import patch as P
-
     lab = np.load(BW / "labels.npz")
     bases, is_val, in_margin = lab["bases"], lab["is_val"], lab["in_margin"]
     tiles = sorted((BW / "tiles").glob("tile_*.npz"))
@@ -293,22 +280,10 @@ def main():
     print(f"\n[gw-base] -> results/geowalker_baseline{tag}_metrics.json")
 
 
-def girth_to_dbh(v):
-    """Girth in cm (';' separated for a multi-stem) -> the thickest stem's DBH."""
-    if not v:
-        return float("nan")
-    try:
-        g = max(float(x) for x in str(v).split(";") if x.strip())
-    except ValueError:
-        return float("nan")
-    return g / np.pi
-
-
 def per_tree(gt, dets, attrs, tag, radius=0.5):
     """One row per GT base, one found/err column per method, plus GeoWalker's
     own result if a patch run left it behind — recall by stem size is the
     decision this table exists to make."""
-    import patch as P
     n = len(gt)
     cols = {}
     for name, (xyz, score) in dets.items():

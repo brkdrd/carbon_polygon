@@ -24,6 +24,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from common.dem import Dem as _Dem
+from common.detect import match_metrics, match_pairs  # noqa: F401
+from common.detect import nms as _nms
+from common.encoder import load_encoder as _load_encoder
+
 GRID = float(os.environ.get("GRID_SIZE", "0.05"))
 SPHERE_R = float(os.environ.get("BW_SPHERE_R", "2.0"))
 N_STEPS = int(os.environ.get("BW_STEPS", "8"))
@@ -100,50 +105,18 @@ def load_scene(tiles_dir, device="cuda"):
 # ---------------------------------------------------------------------------
 # DEM (differentiable bilinear lookup)
 # ---------------------------------------------------------------------------
-class Dem:
-    def __init__(self, npz_path, device="cuda"):
-        d = np.load(npz_path, allow_pickle=True)
-        self.z = torch.from_numpy(d["z"].astype(np.float32)).to(device)
-        self.x0 = float(d["x0"]); self.y0 = float(d["y0"])
-        self.cell = float(d["cell"])
-        self.ny, self.nx = self.z.shape
-
-    def height(self, xy: torch.Tensor) -> torch.Tensor:
-        """Bilinear ground height at xy (B,2); differentiable in xy."""
-        u = ((xy[:, 0] - self.x0) / self.cell).clamp(0, self.nx - 1.001)
-        v = ((xy[:, 1] - self.y0) / self.cell).clamp(0, self.ny - 1.001)
-        u0 = u.detach().floor().long(); v0 = v.detach().floor().long()
-        du = (u - u0.float()).clamp(0, 1); dv = (v - v0.float()).clamp(0, 1)
-        z00 = self.z[v0, u0]; z01 = self.z[v0, u0 + 1]
-        z10 = self.z[v0 + 1, u0]; z11 = self.z[v0 + 1, u0 + 1]
-        return (z00 * (1 - du) * (1 - dv) + z01 * du * (1 - dv)
-                + z10 * (1 - du) * dv + z11 * du * dv)
-
-    def project(self, c: torch.Tensor) -> torch.Tensor:
-        """Drop centers (B,3) onto the cloth: z := dem(x, y).
-
-        The height VALUE is used (so 3D distances stay honest) but its gradient
-        w.r.t. xy is cut: the cloth is a step function at building edges, where
-        d(z)/d(xy) reaches ~6 m/m, and that derivative — multiplied along the
-        8-step chain — dominated everything and blew training up. Walkers ride
-        the ground either way, so z carries no direction signal worth its
-        gradient.
-        """
-        return torch.cat([c[:, :2], self.height(c[:, :2]).detach()[:, None]], dim=1)
+# Dem moved to common/dem.py: a chunk model needs height-above-ground too,
+# and two bilinear lookups that disagree by half a cell would shift every
+# detection one of them touched. Re-exported, so call sites are unchanged.
+Dem = _Dem
 
 
 # ---------------------------------------------------------------------------
 # frozen Sonata encoding of a batch of sphere crops -> coarse tokens
 # ---------------------------------------------------------------------------
-def load_encoder():
-    import sonata
-    model = sonata.load("sonata", repo_id="facebook/sonata",
-                        custom_config=dict(enc_patch_size=[1024] * 5,
-                                           enable_flash=False)).cuda()
-    model.eval()
-    for p in model.parameters():
-        p.requires_grad_(False)
-    return model
+# load_encoder moved to common/encoder.py: both tracks load the same frozen
+# weights and must feed them the same centre-shift and feature layout.
+load_encoder = _load_encoder
 
 
 @torch.no_grad()
@@ -350,52 +323,13 @@ def rollout(model, dec, scene, dem, seeds, bases, n_steps=N_STEPS, r=SPHERE_R,
 # ---------------------------------------------------------------------------
 # detection: NMS + matching metrics
 # ---------------------------------------------------------------------------
-def nms(points: np.ndarray, scores: np.ndarray, radius: float = NMS_R):
-    order = np.argsort(-scores)
-    kept = []
-    for i in order:
-        p = points[i]
-        if all(((p - points[j]) ** 2).sum() > radius * radius for j in kept):
-            kept.append(i)
-    return np.array(kept, dtype=np.int64)
-
-
-def match_pairs(pred_xyz, pred_score, gt_xyz, radius):
-    """Greedy confidence-ordered matching, one GT per detection.
-
-    Returns (pairs, fp_idx, fn_idx): pairs is (K,2) of [pred_i, gt_j], fp_idx
-    indexes unmatched detections, fn_idx indexes unmatched GT bases.
-    """
-    used = np.zeros(len(gt_xyz), bool)
-    hit = np.zeros(len(pred_xyz), bool)
-    pairs = []
-    for i in np.argsort(-pred_score):
-        if used.all():          # also covers the no-GT case
-            break
-        d = np.linalg.norm(gt_xyz - pred_xyz[i][None, :], axis=1)
-        d[used] = np.inf
-        j = int(np.argmin(d))
-        if d[j] <= radius:
-            used[j] = hit[i] = True
-            pairs.append((i, j))
-    return (np.array(pairs, np.int64).reshape(-1, 2),
-            np.flatnonzero(~hit), np.flatnonzero(~used))
-
-
-def match_metrics(pred_xyz, pred_score, gt_xyz, radius):
-    """Greedy confidence-ordered matching. Returns dict with P/R/F1/RMSE."""
-    if len(pred_xyz) == 0:
-        return dict(tp=0, fp=0, fn=len(gt_xyz), precision=0.0, recall=0.0,
-                    f1=0.0, rmse=float("nan"))
-    pairs, fp_i, fn_i = match_pairs(pred_xyz, pred_score, gt_xyz, radius)
-    tp, fp, fn = len(pairs), len(fp_i), len(fn_i)
-    errs = (np.linalg.norm(pred_xyz[pairs[:, 0]] - gt_xyz[pairs[:, 1]], axis=1)
-            if tp else np.zeros(0))
-    prec = tp / max(tp + fp, 1)
-    rec = tp / max(tp + fn, 1)
-    f1 = 2 * prec * rec / max(prec + rec, 1e-9)
-    return dict(tp=tp, fp=fp, fn=fn, precision=prec, recall=rec, f1=f1,
-                rmse=float(np.sqrt(np.mean(np.square(errs)))) if tp else float("nan"))
+# nms / match_pairs / match_metrics moved to common/detect.py: every track in
+# this repo is scored by the same matcher, and a second greedy matcher that
+# drifted by one tie-break would make those scores incomparable.
+# Re-exported here so `from walker import match_metrics` still resolves.
+def nms(points, scores, radius: float = NMS_R):
+    """BaseWalker's NMS: common/detect.nms with this track's BW_NMS_R."""
+    return _nms(points, scores, radius)
 
 
 @torch.no_grad()

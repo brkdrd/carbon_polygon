@@ -16,7 +16,7 @@
                                      # then train + infer the walker on it
     .\run_experiments.ps1 gw_infer_patch # inference on the attributed ~2 ha
     .\run_experiments.ps1 gw_baseline    # classical control, CPU, minutes
-    .\run_experiments.ps1 gw_stem        # dense stem head: train, val, patch
+    .\run_experiments.ps1 stemnet        # dense chunk model: train, val, patch
                                          # patch only: per-tree and
                                          # per-species results
     .\run_experiments.ps1 gw_infer_head  # inference, but endpoints ranked by
@@ -137,19 +137,27 @@ function GwInferAgg { Log "GeoWalker - inference + post-walk evidence stage"
 # the stage prints itself rather than leaving to the reader.
 function GwInferPatch { Log "GeoWalker - inference on the attributed patch"
     Invoke-Stage "geowalker_infer" @("GW_INFER_REGION=patch", "GW_AGGREGATE=1") }
-# Dense stem head: per point, tree-or-not and the offset to its base, then the
-# shifted points are clustered. One encoder pass per window, every point votes.
-function GwStemTrain { Log "GeoWalker - train the dense stem head"
-    Invoke-Stage "geowalker_stem_train" }
-function GwStemInfer { Log "GeoWalker - dense stem inference (held-out val block)"
-    Invoke-Stage "geowalker_stem_infer" }
-function GwStemPatch { Log "GeoWalker - dense stem inference on the attributed patch"
-    Invoke-Stage "geowalker_stem_infer" @("GW_INFER_REGION=patch") }
 # The control nobody had run: classical detection on the same ground, scored by
 # the same matcher. No GPU, no training, minutes - and it is what says whether
 # the network is earning its hours. Needs the CHM, so GwHeight runs first.
 function GwBaseline { Log "GeoWalker - classical baseline on the attributed patch"
     Invoke-Stage "geowalker_baseline" }
+# ---- StemNet: a dense chunk model, no walk --------------------------------
+# Per point: tree-or-not, and the horizontal offset to its base; then the
+# shifted points are clustered. One encoder pass per window. Its own image and
+# its own track - it imports nothing from the walkers.
+function StemBuild { Log "Building stemnet image"
+    Invoke-Docker ($Compose + @("build", "sonata"))
+    Invoke-Docker ($Compose + @("build", "basewalker_prep"))
+    Invoke-Docker ($Compose + @("build", "stemnet_build")) }
+function StemTest  { Log "StemNet - CPU self-check (no GPU, no data)"
+    Invoke-Stage "stemnet_test" }
+function StemTrain { BwPrep; Log "StemNet - train the dense stem head"
+    Invoke-Stage "stemnet_train" }
+function StemInfer { Log "StemNet - inference on the held-out val block"
+    Invoke-Stage "stemnet_infer" }
+function StemPatch { Log "StemNet - inference on the attributed patch"
+    Invoke-Stage "stemnet_infer" @("SN_REGION=patch") }
 function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function GwHeight { Log "GeoWalker - canopy height vs the label criterion"; Invoke-Stage "geowalker_height" }
 function GwHead  { Log "GeoWalker - can the tree/not-tree head be trained?"; Invoke-Stage "geowalker_head" }
@@ -195,15 +203,17 @@ switch ($Target) {
     "gw_infer_agg" { GwBuild; GwHeight; GwInferAgg }
     "gw_infer_patch" { GwBuild; GwHeight; GwInferPatch }
     "gw_baseline" { GwBuild; GwHeight; GwBaseline }
-    "gw_stem_train" { GwBuild; GwStemTrain }
-    "gw_stem_infer" { GwBuild; GwStemInfer }
-    "gw_stem_patch" { GwBuild; GwStemPatch }
-    "gw_stem" { GwBuild; GwStemTrain; GwStemInfer; GwStemPatch }
+    "stem_build" { StemBuild }
+    "stem_test" { StemBuild; StemTest }
+    "stem_train" { StemBuild; StemTrain }
+    "stem_infer" { StemBuild; StemInfer }
+    "stem_patch" { StemBuild; StemPatch }
+    "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_stem|gw_stem_train|gw_stem_infer|gw_stem_patch|gw_diag|gw_height|gw_head]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_infer|stem_patch]"
         exit 2
     }
 }

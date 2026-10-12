@@ -8,22 +8,24 @@ basewalker/poderevka_attributes.csv, and its rows are rows 1..392 of the stem
 map's base_1 block — the ids, latitudes, longitudes and elevations agree to
 1e-9, so species joins onto the labels by position, with no spatial matching.
 
-This module turns that patch into a region the walker can be run over:
+This module turns that patch into a region any model here can be run over
+— it describes the SURVEY, not any one architecture, which is why it lives
+in common:
 
   * the FOOTPRINT, in the scene's local frame. The patch is defined in WGS84 in
     the CSV, so it is projected with the same origin and EPSG prep_scene wrote
     into scene_meta.json — never a hard-coded offset, which would silently
     drift the moment the chunk is re-prepared.
-  * the SEEDS inside it, taken from the scene's own seed grid rather than a new
-    one, so a patch run is a subset of the full run and not a different
-    experiment.
+  * the SEEDS inside it (for a model that uses seeds at all), taken from the
+    scene's own seed grid rather than a new one, so a patch run is a subset of
+    the full run and not a different experiment.
   * the GT inside it, taken from labels.npz, so the fork-merge and coverage
     filtering that produced every other number here apply unchanged.
 
 WHAT THIS PATCH IS NOT: held out. The train/val split is a quantile on local x
 (rightmost 20% is val) and this patch sits in the LEFT tail — the model trained
-on these labels. `select` measures that and returns it, and infer.py refuses to
-report a patch score without saying so. A number from here is an upper bound on
+on these labels. `select` measures that and returns it, and every stage that reads it
+says so out loud. A number from here is an upper bound on
 what the model would do on unseen ground, not an estimate of it.
 """
 from __future__ import annotations
@@ -31,31 +33,42 @@ from __future__ import annotations
 import csv
 import json
 import os
-import sys
 from pathlib import Path
 
 import numpy as np
 
-sys.path[:0] = [str(Path(__file__).resolve().parent), "/app"]
-from common import config as C  # noqa: E402
+from . import config as C
 
-BW = C.DATA / "basewalker"
-ATTR_CSV = Path("/app/poderevka_attributes.csv")
-SCENE_META = BW / "scene_meta.json"
+# PREP, not BaseWalker: tiles / dem / labels / seeds are the shared scene prep
+# that every track reads; the directory is named after the stage that writes it.
+PREP = C.DATA / "basewalker"
+BW = PREP                       # kept: older call sites import patch.BW
+SCENE_META = PREP / "scene_meta.json"
+# Baked into the image beside the stem map. The repo path is a fallback so the
+# module also works in a plain checkout (tests, a local smoke run) instead of
+# failing with a container path that cannot exist there.
+ATTR_CSV = next(
+    (q for q in (Path("/app/poderevka_attributes.csv"),
+                 Path(__file__).resolve().parents[1]
+                 / "basewalker" / "poderevka_attributes.csv")
+     if q.exists()),
+    Path("/app/poderevka_attributes.csv"))
 
 # how far outside the surveyed trees still counts as "in the patch". The survey
 # is exhaustive inside its polygon and says nothing beyond it, so a detection
 # just outside is neither a hit nor a miss — it is unjudgeable, exactly like the
 # unsurveyed terrain in the full run.
-MARGIN = float(os.environ.get("GW_PATCH_MARGIN", "3.0"))
+MARGIN = float(os.environ.get("PATCH_MARGIN",
+                              os.environ.get("GW_PATCH_MARGIN", "3.0")))
 
 
 def load_attributes(path=ATTR_CSV):
     """The 392-tree attribute table as a dict of columns."""
     path = Path(path)
     if not path.exists():
-        raise SystemExit(f"[gw-patch] {path} not found — it ships in the image; "
-                         f"rebuild with the geowalker Dockerfile")
+        raise SystemExit(f"[patch] {path} not found — it ships in the image "
+                         f"(basewalker/Dockerfile copies it); rebuild, or pass "
+                         f"an explicit path")
     n, lat, lon, z, girth, species, amb = [], [], [], [], [], [], []
     with open(path) as f:
         for r in csv.DictReader(f):
@@ -71,7 +84,7 @@ def to_local(lat, lon, meta=SCENE_META):
     """WGS84 -> the scene's local frame, via the origin prep_scene recorded."""
     meta = Path(meta)
     if not meta.exists():
-        raise SystemExit(f"[gw-patch] {meta} not found — run bw_prep first")
+        raise SystemExit(f"[patch] {meta} not found — run bw_prep first")
     m = json.loads(meta.read_text())
     origin = np.asarray(m["origin_utm"], np.float64)
     from pyproj import Transformer
@@ -168,3 +181,21 @@ def join_species(gt_xy, attrs=None, tol=0.35, meta=SCENE_META):
         dist_m=np.where(ok, d, np.nan),
     )
     return out, ok
+
+
+def girth_to_dbh(v):
+    """Girth in cm -> the thickest stem's DBH in cm.
+
+    The survey writes a forked tree as '29;22', so a bare float() loses the
+    whole row. Recall by stem size is read off this column, which is the table
+    that separates a model's failure from the target's definition: about half
+    these stems are under 10 cm DBH and together they carry ~4% of the basal
+    area.
+    """
+    if not v:
+        return float("nan")
+    try:
+        g = max(float(x) for x in str(v).split(";") if x.strip())
+    except ValueError:
+        return float("nan")
+    return g / np.pi

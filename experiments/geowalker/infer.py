@@ -227,7 +227,7 @@ def patch_tables(gt, det_xyz, det_s, attrs, tag, radius=0.5):
     survey can actually check, and the one place a per-species recall is
     meaningful — so a miss gets a row of its own rather than only a count.
     """
-    import patch as P
+    from common import patch as P
     pairs, fp_i, fn_i = M.match_pairs(det_xyz, det_s, gt, radius)
     sp, known = P.join_species(gt[:, :2], attrs=attrs)
 
@@ -307,7 +307,7 @@ def main():
         seeds = sd["seeds"][sd["is_val"]]
         gt = bases[lab["is_val"]]
     elif region == "patch":
-        import patch as P
+        from common import patch as P
         patch_attrs = P.load_attributes()
         seeds, gt, _rows, patch_info = P.select(
             sd["seeds"], bases, lab["is_val"], lab["in_margin"],

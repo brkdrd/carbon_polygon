@@ -160,6 +160,7 @@ built exactly once — so the four experiments provably share one input.
 | `treelearn_raw` / `_masked` | built (`treelearn/Dockerfile`) | ✅ | TreeLearn instance segmentation → exp1 / exp3 |
 | `segmentanytree_raw` / `_masked` | official `maciekwielgosz/segment-any-tree` | ✅ | SegmentAnyTree instance segmentation |
 | `sat_render_raw` / `_masked` | reuses `prep` image (CPU) | — | render SAT output → exp2 / exp4 |
+| `stemnet_train` / `_infer` | built (`stemnet/Dockerfile`, on `basewalker`) | ✅ | dense chunk model: per point, tree + offset to its base |
 
 - **TreeLearn** ([ecker-lab/TreeLearn](https://github.com/ecker-lab/TreeLearn))
   ships no image, so `treelearn/Dockerfile` reproduces its `setup.sh` on a
@@ -231,7 +232,8 @@ Two things the stage prints that any reader of its score needs:
   re-measurements. They are real trees, so they stay in the GT and a miss
   counts; only the per-species table is restricted to the attributed subset.
 
-Knobs: `GW_PATCH_MARGIN` (3.0 m) is how far outside the surveyed hull still
+Knobs: `PATCH_MARGIN` (3.0 m; `GW_PATCH_MARGIN` still honoured) is how far
+outside the surveyed hull still
 counts as judgeable. The footprint is the hull **or** that buffer, because a
 clearing inside the patch is surveyed ground and a detection in it is a real
 false positive.
@@ -351,10 +353,6 @@ One stage at a time (same target names in both launchers):
 | `gw_diag` | why recall is what it is (walk / NMS / threshold) | GPU, ~minutes |
 | `gw_infer_patch` | inference restricted to the densely attributed survey patch — 392 trees, 25 species, girth on 388, ~1.14 ha. Writes a per-tree answer sheet and a per-species recall. **These are training labels**, and the stage says so | GPU, ~1.6 h (2.9k seeds) |
 | `gw_baseline` | the control: classical training-free detection on the same patch, scored by the same matcher — breast-height density peaks confirmed by a vertical column, and CHM local maxima. Says whether the network is beating a 1990s algorithm | CPU, ~minutes |
-| `gw_stem_train` | train the dense stem head on the frozen encoder — per point, tree-or-not plus the horizontal offset to its base | GPU, ~minutes to an hour |
-| `gw_stem_infer` | dense stem inference on the **held-out val block** — one encoder pass per window, every point votes | GPU, ~minutes |
-| `gw_stem_patch` | the same on the attributed patch, with the per-tree answer sheet and recall by stem size | GPU, ~minutes |
-| `gw_stem` | all three in order | GPU |
 | `gw_height` | canopy height vs the annotators' criterion | CPU, ~minutes |
 | `gw_head` | can the tree/not-tree decision be trained on its own? | GPU, walk-bound; resumable |
 
@@ -538,7 +536,23 @@ They share the scene, the split and the metric, so their numbers are directly
 comparable — `10_/11_` images are BaseWalker's, `20_/21_/22_` are GeoWalker's.
 
 
-## Dense stem head (one pass, every point votes)
+## StemNet — a dense chunk model (separate study track)
+
+**Not a walker.** No sphere, no step, no memory of previous positions, no
+through-cloud distance field, no seed grid. The scene is just a chunk of points,
+processed one window at a time, and every point is read exactly once. It has its
+own image and imports nothing from `geowalker/` or `basewalker/` — the only
+things the tracks share are the prepared scene (tiles, DEM, labels), the frozen
+encoder and the matcher that scores them, and all three live in `common/`:
+
+| in `common/` | why it is shared |
+| --- | --- |
+| `detect.py` | `match_metrics` / `match_pairs` — four tracks are scored by this, and a second greedy matcher that drifted by one tie-break would make their results incomparable |
+| `dem.py` | one bilinear ground lookup; a half-cell disagreement would shift every detection it touched |
+| `encoder.py` | the frozen Sonata loader and the dense read-out; a crop centre-shifted differently is one the pretrained weights have never seen, and the failure is silent |
+| `patch.py` | the attributed survey patch — it describes the *survey*, not any one model |
+| `raster.py` | `peaks`, so "two stems 0.6 m apart are two detections" means the same thing in the CHM filter, the density detector and the vote histogram |
+
 
 The walker's own measurement is what motivated this. On the attributed patch it
 missed 305 of 522 trees at 0.5 m, but **94% of those misses had a detection
@@ -550,8 +564,9 @@ information needed to place a stem is already in the points standing around it.
 So the same frozen Sonata encoder is read **densely** instead:
 
 * the coarse tokens are upcast back to the input points through the pooling
-  chain (the standard Sonata linear-probe read-out; `stemnet.upcast` falls back
-  to nearest-token features and says so if a build does not expose the chain);
+  chain (the standard Sonata linear-probe read-out; `common.encoder.upcast`
+  falls back to nearest-token features and says so if a build does not expose
+  the chain);
 * two heads per point — a logit for *this point belongs to a tree stem*, and a
   **2-D horizontal** offset to that stem's base;
 * detections are peaks in the confidence-weighted histogram of the **shifted**
@@ -560,7 +575,7 @@ So the same frozen Sonata encoder is read **densely** instead:
 
 **Why those two targets.** The only per-tree truth in this project is a set of
 RTK stem bases — no per-point instance or semantic labels exist for this cloud.
-So "is a tree" is defined as *within `GW_SN_NEAR_R` metres **horizontally** of a
+So "is a tree" is defined as *within `SN_NEAR_R` metres **horizontally** of a
 surveyed base*, which inside the breast-height band is a trunk and its
 immediate surroundings. Narrower than tree/not-tree, and it is what the data can
 actually supervise. Horizontal because a trunk point 3 m up is 3 m from its base
@@ -568,38 +583,39 @@ in 3-D but ~0.15 m from it in plan view; the base's z comes from the DEM, so the
 head never predicts it and the target is a short, low-variance 2-D vector
 instead of the walker's 8 m trajectory.
 
-**Why it is cheap.** Only the `GW_SN_BAND_LO`..`GW_SN_BAND_HI` slice above the
+**Why it is cheap.** Only the `SN_BAND_LO`..`SN_BAND_HI` slice above the
 DEM is ever encoded — the ground carries no stem and the crown cannot say where
-a trunk meets the soil — and that slice is voxel-deduplicated at `GW_SN_VOXEL`,
+a trunk meets the soil — and that slice is voxel-deduplicated at `SN_VOXEL`,
 which is lossless as far as an encoder that serialises on a 0.05 m lattice is
 concerned. One pass per window over ~5-10% of the points replaces 9 encodes per
 2 m seed. The stage prints its own ha/h next to the walker's 1.35 h/ha.
 
 ```bash
-./run_experiments.sh gw_stem            # train, then val, then patch
-./run_experiments.sh gw_stem_infer      # the held-out score, on its own
+./run_experiments.sh stemnet        # test, train, val, patch
+./run_experiments.sh stem_infer     # the held-out score, on its own
+./run_experiments.sh stem_test      # CPU self-check, seconds
 ```
 
 | file | what it holds |
 | --- | --- |
-| `data/models/geowalker_stemnet.pth` | best-val-F1 head (+ `_last.pth`) |
-| `results/geowalker_stem_val_metrics.json` | the honest score: P/R/F1/RMSE at 0.5 m and 1.0 m, threshold sweep, ha/h |
-| `results/geowalker_stem_val_detections.csv` | `x,y,z,score,n_votes` |
-| `results/geowalker_stem_patch_trees.csv` | same columns as `geowalker_patch_trees.csv`, so the walker and the head diff line for line |
-| `results/23_geowalker_stem_val.png` | detections, and the vote cloud beside them |
+| `data/models/stemnet.pth` | best-val-F1 head (+ `_last.pth`) |
+| `results/stemnet_val_metrics.json` | the honest score: P/R/F1/RMSE at 0.5 m and 1.0 m, threshold sweep, ha/h |
+| `results/stemnet_val_detections.csv` | `x,y,z,score,n_votes` |
+| `results/stemnet_patch_trees.csv` | same columns as `geowalker_patch_trees.csv`, so the walker and the head diff line for line |
+| `results/30_stemnet_val.png` | detections, and the vote cloud beside them |
 
 Training windows are centred on train bases and never allowed to reach across
 the leakage margin into the val block; validation during training is the **full
 detection metric** (vote, cluster, match) on a fixed sample of val windows, and
-only the best-F1 head is checkpointed. Resumes by default (`GW_SN_RESUME=0`
-starts cold); `GW_SN_ITERS` counts *this* run.
+only the best-F1 head is checkpointed. Resumes by default (`SN_RESUME=0` starts
+cold); `SN_ITERS` counts *this* run.
 
-Knobs: `GW_SN_WIN` (16 m predicted square), `GW_SN_PAD` (2 m context ring,
+Knobs: `SN_WIN` (16 m predicted square), `SN_PAD` (2 m context ring,
 encoded but not predicted on, so inner squares tile exactly and no point votes
-twice), `GW_SN_BAND_LO/HI` (0.3/4.0 m), `GW_SN_NEAR_R` (1.0 m), `GW_SN_VOXEL`
-(0.05 m), `GW_SN_PTS` (250k per pass), `GW_SN_P` (0.5, a point votes above
-this), `GW_SN_VOTE_CELL/SEP/R/MIN` (0.1 / 0.6 / 0.3 / 6.0), `GW_SN_ITERS`,
-`GW_SN_LR`, `GW_SN_W_OFF`, `GW_SN_EVAL`, `GW_SN_EVAL_WIN`.
+twice), `SN_BAND_LO/HI` (0.3/4.0 m), `SN_NEAR_R` (1.0 m), `SN_VOXEL`
+(0.05 m), `SN_PTS` (250k per pass), `SN_P` (0.5, a point votes above
+this), `SN_VOTE_CELL/SEP/R/MIN` (0.1 / 0.6 / 0.3 / 6.0), `SN_ITERS`,
+`SN_LR`, `SN_W_OFF`, `SN_EVAL`, `SN_EVAL_WIN`.
 
 
 ## Notes & caveats
@@ -644,13 +660,19 @@ experiments/
   run_experiments.sh        # the one command
   docker-compose.yml
   .env.example
-  common/                   # geo.py (the float32 fix), viz.py, config.py
+  common/                   # shared by every track, and the reason the
+                            #   numbers compare: geo.py (the float32 fix),
+                            #   dem.py, detect.py (the one matcher),
+                            #   encoder.py (frozen Sonata + dense read-out),
+                            #   patch.py (the attributed survey), raster.py
   prep/                     # chunk builder (+ SAT renderer), Dockerfile
   sonata/                   # vegetation head train + mask, Dockerfile
   treelearn/                # TreeLearn wrapper, Dockerfile
   segmentanytree/           # SAT output renderer (SAT itself is the official image)
   geowalker/                # through-cloud distance field + the walker on it
-  tests/                    # float32-fix + GeoWalker regression tests (CPU)
+  stemnet/                  # dense chunk model: per point, tree + offset to
+                            #   its base. No walk; its own image
+  tests/                    # float32-fix, GeoWalker and StemNet CPU tests
   data/                     # runtime volume (git-ignored artifacts)
   results/                  # output PNGs
 ```

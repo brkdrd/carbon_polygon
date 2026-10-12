@@ -92,19 +92,25 @@ gw_infer_agg() { log "GeoWalker — inference + post-walk evidence stage"
 # stage prints that itself rather than leaving it to the reader.
 gw_infer_patch() { log "GeoWalker — inference on the attributed patch"
                    $RUN -e GW_INFER_REGION=patch -e GW_AGGREGATE=1 geowalker_infer; }
-# Dense stem head: per point, tree-or-not and the offset to its base, then the
-# shifted points are clustered. One encoder pass per window, every point votes.
-gw_stem_train() { log "GeoWalker — train the dense stem head"
-                  $RUN geowalker_stem_train; }
-gw_stem_infer() { log "GeoWalker — dense stem inference (held-out val block)"
-                  $RUN geowalker_stem_infer; }
-gw_stem_patch() { log "GeoWalker — dense stem inference on the attributed patch"
-                  $RUN -e GW_INFER_REGION=patch geowalker_stem_infer; }
 # The control nobody had run: classical detection on the same ground, scored by
 # the same matcher. No GPU, no training, minutes — and it is what says whether
 # the network is earning its hours. Needs the CHM, so gw_height runs first.
 gw_baseline() { log "GeoWalker — classical baseline on the attributed patch"
                 $RUN geowalker_baseline; }
+# ---- StemNet: a dense chunk model, no walk --------------------------------
+# Per point: tree-or-not, and the horizontal offset to its base; then the
+# shifted points are clustered. One encoder pass per window. Its own image and
+# its own track -- it imports nothing from the walkers.
+stem_build() { log "Building stemnet image"; $DC build sonata
+               $DC build basewalker_prep; $DC build stemnet_build; }
+stem_test()  { log "StemNet — CPU self-check (no GPU, no data)"
+               $RUN stemnet_test; }
+stem_train() { bw_prep; log "StemNet — train the dense stem head"
+               $RUN stemnet_train; }
+stem_infer() { log "StemNet — inference on the held-out val block"
+               $RUN stemnet_infer; }
+stem_patch() { log "StemNet — inference on the attributed patch"
+               $RUN -e SN_REGION=patch stemnet_infer; }
 gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
 gw_height() { log "GeoWalker — canopy height vs the label criterion"; $RUN geowalker_height; }
 gw_head()  { log "GeoWalker — can the tree/not-tree head be trained?"; $RUN geowalker_head; }
@@ -156,6 +162,7 @@ case "${1:-all}" in
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
-gw_stem|gw_stem_train|gw_stem_infer|gw_stem_patch|gw_diag|\
-gw_height|gw_head]"; exit 2 ;;
+gw_diag|\
+gw_height|gw_head|\
+stemnet|stem_build|stem_test|stem_train|stem_infer|stem_patch]"; exit 2 ;;
 esac

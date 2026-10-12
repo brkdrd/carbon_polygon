@@ -8,17 +8,17 @@ the per-point features, and the loss is two terms:
   * BCE on "this point belongs to a stem", pos_weight set from the actual
     class balance of the window so the head is not simply taught to say no;
   * Smooth-L1 on the horizontal offset to that stem's base, on positives only
-    and scaled by GW_SN_NEAR_R, because an offset target is meaningless for a
+    and scaled by SN_NEAR_R, because an offset target is meaningless for a
     point that belongs to no stem.
 
 Validation is the thing that matters and the thing the walker's training loop
 could not afford: the full detection metric — vote, cluster, match against the
-val bases — on a fixed sample of val windows, every GW_SN_EVAL iterations. The
+val bases — on a fixed sample of val windows, every SN_EVAL iterations. The
 best-F1 head is what gets checkpointed, so a run that overfits cannot damage
 what inference reads.
 
-Resumes by default from data/models/geowalker_stemnet.pth with its AdamW state
-and best F1; GW_SN_RESUME=0 starts cold. GW_SN_ITERS counts THIS run.
+Resumes by default from data/models/stemnet.pth with its AdamW state
+and best F1; SN_RESUME=0 starts cold. SN_ITERS counts THIS run.
 """
 from __future__ import annotations
 
@@ -33,20 +33,20 @@ import torch.nn.functional as F
 
 sys.path[:0] = [str(Path(__file__).resolve().parent), "/app"]
 from common import config as C  # noqa: E402
-import stemnet as S  # noqa: E402
+import net as S  # noqa: E402
 
-ITERS = int(os.environ.get("GW_SN_ITERS", "4000"))
-LR = float(os.environ.get("GW_SN_LR", "1e-3"))
-WD = float(os.environ.get("GW_SN_WD", "1e-4"))
-W_OFF = float(os.environ.get("GW_SN_W_OFF", "1.0"))
-EVAL_EVERY = int(os.environ.get("GW_SN_EVAL", "250"))
-EVAL_WINDOWS = int(os.environ.get("GW_SN_EVAL_WIN", "12"))
-MATCH_R = float(os.environ.get("GW_SN_MATCH_R", "0.5"))
-RESUME = os.environ.get("GW_SN_RESUME", "1") != "0"
-RESUME_LR = float(os.environ.get("GW_SN_RESUME_LR", str(LR)))
-SEED = int(os.environ.get("GW_SN_SEED", "0"))
-POS_W_CAP = float(os.environ.get("GW_SN_POS_W_CAP", "20.0"))
-PROGRESS_S = float(os.environ.get("GW_PROGRESS_S", "30"))
+ITERS = int(os.environ.get("SN_ITERS", "4000"))
+LR = float(os.environ.get("SN_LR", "1e-3"))
+WD = float(os.environ.get("SN_WD", "1e-4"))
+W_OFF = float(os.environ.get("SN_W_OFF", "1.0"))
+EVAL_EVERY = int(os.environ.get("SN_EVAL", "250"))
+EVAL_WINDOWS = int(os.environ.get("SN_EVAL_WIN", "12"))
+MATCH_R = float(os.environ.get("SN_MATCH_R", "0.5"))
+RESUME = os.environ.get("SN_RESUME", "1") != "0"
+RESUME_LR = float(os.environ.get("SN_RESUME_LR", str(LR)))
+SEED = int(os.environ.get("SN_SEED", "0"))
+POS_W_CAP = float(os.environ.get("SN_POS_W_CAP", "20.0"))
+PROGRESS_S = float(os.environ.get("SN_PROGRESS_S", "30"))
 
 
 def save(path, head, opt, it, val, feat_dim):
@@ -70,13 +70,13 @@ def window_batch(band, centres, rng, cap=None):
     return pos, inner, (cx, cy)
 
 
-def forward_window(enc, head, scene, band, pos, inner, bases_xy, train=True):
+def forward_window(enc, head, chunk, band, pos, inner, bases_xy, train=True):
     """Encode one window, predict, and return (loss parts, predictions)."""
-    idx = band.idx[torch.as_tensor(pos, device=scene.device)]
-    feat = S.encode_points(enc, scene, idx)
-    xy = scene.xyz[idx][:, :2]
+    idx = band.idx[torch.as_tensor(pos, device=chunk.device)]
+    feat = S.encode_points(enc, chunk, idx)
+    xy = chunk.xyz[idx][:, :2]
     is_stem, off_t = S.targets(xy, bases_xy)
-    m = torch.as_tensor(inner, device=scene.device)
+    m = torch.as_tensor(inner, device=chunk.device)
 
     with torch.set_grad_enabled(train):
         logit, off_p = head(feat)
@@ -96,7 +96,7 @@ def forward_window(enc, head, scene, band, pos, inner, bases_xy, train=True):
 
 
 @torch.no_grad()
-def evaluate(enc, head, scene, band, centres, val_bases, match_r=MATCH_R):
+def evaluate(enc, head, chunk, band, centres, val_bases, match_r=MATCH_R):
     """The real metric: vote, cluster, match. Pooled over the eval windows so
     one sparse window cannot dominate the number."""
     head.eval()
@@ -108,11 +108,11 @@ def evaluate(enc, head, scene, band, centres, val_bases, match_r=MATCH_R):
         if len(pos) > S.PTS_CAP:
             sel = np.random.default_rng(0).permutation(len(pos))[:S.PTS_CAP]
             pos, inner = pos[sel], inner[sel]
-        idx = band.idx[torch.as_tensor(pos, device=scene.device)]
-        feat = S.encode_points(enc, scene, idx)
+        idx = band.idx[torch.as_tensor(pos, device=chunk.device)]
+        feat = S.encode_points(enc, chunk, idx)
         logit, off = head(feat)
-        m = torch.as_tensor(inner, device=scene.device)
-        xy = scene.xyz[idx][:, :2]
+        m = torch.as_tensor(inner, device=chunk.device)
+        xy = chunk.xyz[idx][:, :2]
         xs.append(xy[m].cpu().numpy())
         ps.append(torch.sigmoid(logit[m]).cpu().numpy())
         os_.append(off[m].cpu().numpy())
@@ -149,18 +149,18 @@ def main():
     rng = np.random.default_rng(SEED)
     torch.manual_seed(SEED)
 
-    lab = np.load(S.BW / "labels.npz")
+    lab = np.load(S.PREP / "labels.npz")
     bases, is_val, in_margin = lab["bases"], lab["is_val"], lab["in_margin"]
     xq = S.split_x(lab)
     tr_bases = bases[~is_val & ~in_margin]
     va_bases = bases[is_val & ~in_margin]
-    print(f"[gw-sn] split x={xq:.1f} | train bases {len(tr_bases)} | "
+    print(f"[sn] split x={xq:.1f} | train bases {len(tr_bases)} | "
           f"val bases {len(va_bases)}")
 
-    scene = S.load_scene(S.BW / "tiles", device=dev)
-    dem = S.Dem(S.BW / "dem.npz", device=dev)
-    band = S.Band(scene, dem)
-    enc = S.load_encoder()
+    chunk = S.load_chunk(device=dev)
+    dem = S.Dem(S.PREP / "dem.npz", device=dev)
+    band = S.Band(chunk, dem)
+    enc = S.load_encoder(device=dev)
 
     # training windows: centred on train bases, jittered, and never allowed to
     # reach across the margin into the val block
@@ -169,14 +169,14 @@ def main():
     tr_centres = tr_bases[:, :2] + jit
     tr_centres = tr_centres[tr_centres[:, 0] < lim]
     if not len(tr_centres):
-        raise SystemExit("[gw-sn] no train windows fit left of the margin")
+        raise SystemExit("[sn] no train windows fit left of the margin")
     va_lo = xq + S.VAL_MARGIN / 2 + S.WIN / 2
     va_c = va_bases[va_bases[:, 0] > va_lo][:, :2]
     if not len(va_c):
-        raise SystemExit("[gw-sn] no val windows fit right of the margin")
+        raise SystemExit("[sn] no val windows fit right of the margin")
     ev_centres = va_c[np.linspace(0, len(va_c) - 1,
                                   min(EVAL_WINDOWS, len(va_c))).astype(int)]
-    print(f"[gw-sn] {len(tr_centres)} train window centres (x < {lim:.1f}) | "
+    print(f"[sn] {len(tr_centres)} train window centres (x < {lim:.1f}) | "
           f"{len(ev_centres)} eval windows")
 
     tr_xy = torch.from_numpy(tr_bases[:, :2].astype(np.float32)).to(dev)
@@ -185,8 +185,8 @@ def main():
     pos, inner, _ = window_batch(band, tr_centres, rng)
     idx = band.idx[torch.as_tensor(pos, device=dev)]
     with torch.no_grad():
-        feat_dim = int(S.encode_points(enc, scene, idx).shape[1])
-    print(f"[gw-sn] dense feature dim {feat_dim}")
+        feat_dim = int(S.encode_points(enc, chunk, idx).shape[1])
+    print(f"[sn] dense feature dim {feat_dim}")
 
     head = S.StemHead(feat_dim).to(dev)
     opt = torch.optim.AdamW(head.parameters(), lr=LR, weight_decay=WD)
@@ -195,7 +195,7 @@ def main():
         ck = torch.load(S.CKPT, map_location=dev, weights_only=False)
         if int(ck.get("feat_dim", feat_dim)) != feat_dim:
             raise SystemExit(
-                f"[gw-sn] {S.CKPT} was trained on {ck['feat_dim']}-d features, "
+                f"[sn] {S.CKPT} was trained on {ck['feat_dim']}-d features, "
                 f"this encoder gives {feat_dim} — delete it or fix the read-out")
         head.load_state_dict(ck["state_dict"])
         opt.load_state_dict(ck["opt"])
@@ -203,10 +203,10 @@ def main():
         best_f1 = float(ck.get("val", {}).get("f1", -1.0))
         for g in opt.param_groups:
             g["lr"] = RESUME_LR
-        print(f"[gw-sn] resuming {S.CKPT} @ it {it0} (val F1 {best_f1:.3f}) | "
+        print(f"[sn] resuming {S.CKPT} @ it {it0} (val F1 {best_f1:.3f}) | "
               f"+{ITERS} iters at peak LR {RESUME_LR:g}")
     elif RESUME:
-        print(f"[gw-sn] no checkpoint at {S.CKPT} — training from scratch")
+        print(f"[sn] no checkpoint at {S.CKPT} — training from scratch")
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=ITERS)
 
     head.train()
@@ -216,7 +216,7 @@ def main():
         if len(pos) < 64 or not inner.any():
             continue
         l_cls, l_off, n_pos, n_pts, _ = forward_window(
-            enc, head, scene, band, pos, inner, tr_xy, train=True)
+            enc, head, chunk, band, pos, inner, tr_xy, train=True)
         loss = l_cls + W_OFF * l_off
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -231,23 +231,23 @@ def main():
             last = time.time()
             done = it - it0
             eta = (time.time() - t0) / max(done, 1) * (ITERS - done)
-            print(f"[gw-sn] it {it}/{it0+ITERS} cls {run['cls']:.4f} "
+            print(f"[sn] it {it}/{it0+ITERS} cls {run['cls']:.4f} "
                   f"off {run['off']:.4f} pos {run['pos']*100:.1f}% "
                   f"pts {run['pts']:,.0f} lr {sched.get_last_lr()[0]:.2e} "
                   f"eta {eta/60:.0f}m", flush=True)
 
         if it % EVAL_EVERY == 0 or it == it0 + ITERS:
-            v = evaluate(enc, head, scene, band, ev_centres, va_bases)
-            print(f"[gw-sn] EVAL it {it}: F1@{MATCH_R} {v['f1']:.3f} "
+            v = evaluate(enc, head, chunk, band, ev_centres, va_bases)
+            print(f"[sn] EVAL it {it}: F1@{MATCH_R} {v['f1']:.3f} "
                   f"(P {v.get('precision',0):.3f} R {v.get('recall',0):.3f}) "
                   f"{v.get('n_det',0)} det / {v.get('n_gt',0)} GT", flush=True)
             save(S.LAST_CKPT, head, opt, it, v, feat_dim)
             if v["f1"] > best_f1:
                 best_f1 = v["f1"]
                 save(S.CKPT, head, opt, it, v, feat_dim)
-                print(f"[gw-sn]   new best -> {S.CKPT}")
+                print(f"[sn]   new best -> {S.CKPT}")
 
-    print(f"[gw-sn] done in {(time.time()-t0)/60:.1f} min | best val F1 "
+    print(f"[sn] done in {(time.time()-t0)/60:.1f} min | best val F1 "
           f"{best_f1:.3f} -> {S.CKPT}")
 
 

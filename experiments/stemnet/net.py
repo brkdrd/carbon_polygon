@@ -23,7 +23,7 @@ So: one forward pass, every point votes.
 Why these targets and not something more ambitious: the only per-tree truth in
 this project is a set of RTK stem bases. There is no per-point instance label
 and no semantic label on this cloud, so "is a tree" is operationalised as "lies
-within GW_SN_NEAR_R metres HORIZONTALLY of a surveyed base" — which, restricted
+within SN_NEAR_R metres HORIZONTALLY of a surveyed base" — which, restricted
 to the breast-height band, is a trunk and its immediate surroundings. That is a
 narrower claim than tree/not-tree, and it is the one the
 data can actually support — and it is exactly what we need, since a stem base
@@ -39,8 +39,14 @@ context ring that is encoded but never predicted on, so a trunk at a window
 edge is still seen inside somebody's neighbourhood. Inner squares tile exactly,
 so no point is counted twice.
 
-Shared by stem_train.py and stem_infer.py; nothing here touches the filesystem
-at import.
+Not a walker. There is no sphere, no step, no memory of previous positions, no
+through-cloud distance field and no seed grid — the scene is just a chunk of
+points, processed a window at a time, and every point is read once. That is why
+this is its own track rather than another GeoWalker stage: the only things the
+two share are the prepared scene (tiles, DEM, labels), the frozen encoder and
+the matcher that scores them both, and those all live in `common`.
+
+Shared by train.py and infer.py; nothing here touches the filesystem at import.
 """
 from __future__ import annotations
 
@@ -54,96 +60,60 @@ import torch.nn as nn
 
 sys.path[:0] = [str(Path(__file__).resolve().parent), "/app"]
 from common import config as C  # noqa: E402
-from walker import SceneStore, Dem, load_scene, load_encoder  # noqa: E402,F401
-from walker import match_metrics, match_pairs  # noqa: E402,F401
+from common.dem import Dem  # noqa: E402,F401
+from common.detect import match_metrics, match_pairs  # noqa: E402,F401
+from common.encoder import load_encoder, upcast  # noqa: E402,F401
+from common.raster import peaks  # noqa: E402
 
-BW = C.DATA / "basewalker"
-GW = C.DATA / "geowalker"
-CKPT = C.MODELS / "geowalker_stemnet.pth"
-LAST_CKPT = C.MODELS / "geowalker_stemnet_last.pth"
+# PREP, not BaseWalker: tiles / dem / labels / seeds are the shared scene prep
+# that every track in this repo reads. The directory is named after the stage
+# that happens to write them.
+PREP = C.DATA / "basewalker"
+CKPT = C.MODELS / "stemnet.pth"
+LAST_CKPT = C.MODELS / "stemnet_last.pth"
 
 GRID = float(os.environ.get("GRID_SIZE", "0.05"))
-VOXEL = float(os.environ.get("GW_SN_VOXEL", str(GRID)))   # band dedup resolution
-BAND_LO = float(os.environ.get("GW_SN_BAND_LO", "0.3"))   # m above the DEM
-BAND_HI = float(os.environ.get("GW_SN_BAND_HI", "4.0"))
-NEAR_R = float(os.environ.get("GW_SN_NEAR_R", "1.0"))     # positive-label radius
-WIN = float(os.environ.get("GW_SN_WIN", "16.0"))          # predicted square, m
-PAD = float(os.environ.get("GW_SN_PAD", "2.0"))           # encoded context ring
-PTS_CAP = int(float(os.environ.get("GW_SN_PTS", "250000")))
-P_THRESH = float(os.environ.get("GW_SN_P", "0.5"))        # a point votes above this
-VOTE_CELL = float(os.environ.get("GW_SN_VOTE_CELL", "0.1"))
-VOTE_SEP = float(os.environ.get("GW_SN_VOTE_SEP", "0.6"))  # two stems this far apart
-VOTE_R = float(os.environ.get("GW_SN_VOTE_R", "0.3"))     # voters pooled per peak
-VOTE_MIN = float(os.environ.get("GW_SN_VOTE_MIN", "6.0"))  # minimum vote mass
+VOXEL = float(os.environ.get("SN_VOXEL", str(GRID)))   # band dedup resolution
+BAND_LO = float(os.environ.get("SN_BAND_LO", "0.3"))   # m above the DEM
+BAND_HI = float(os.environ.get("SN_BAND_HI", "4.0"))
+NEAR_R = float(os.environ.get("SN_NEAR_R", "1.0"))     # positive-label radius
+WIN = float(os.environ.get("SN_WIN", "16.0"))          # predicted square, m
+PAD = float(os.environ.get("SN_PAD", "2.0"))           # encoded context ring
+PTS_CAP = int(float(os.environ.get("SN_PTS", "250000")))
+P_THRESH = float(os.environ.get("SN_P", "0.5"))        # a point votes above this
+VOTE_CELL = float(os.environ.get("SN_VOTE_CELL", "0.1"))
+VOTE_SEP = float(os.environ.get("SN_VOTE_SEP", "0.6"))  # two stems this far apart
+VOTE_R = float(os.environ.get("SN_VOTE_R", "0.3"))     # voters pooled per peak
+VOTE_MIN = float(os.environ.get("SN_VOTE_MIN", "6.0"))  # minimum vote mass
 VAL_MARGIN = float(os.environ.get("BW_VAL_MARGIN", "10.0"))
-DEVICE = os.environ.get("GW_DEVICE", "cuda")
+DEVICE = os.environ.get("SN_DEVICE", "cuda")
 
 
 # ---------------------------------------------------------------------------
-# reading Sonata densely
+# one window of points -> per-point features -> two predictions
 # ---------------------------------------------------------------------------
-_UPCAST_NOTE = []
-
-
-def upcast(point, want_xyz):
-    """Coarse Sonata tokens -> one feature vector per input point.
-
-    The pooling chain is the documented Sonata read-out: each level's features
-    are concatenated onto its parent through the inverse pooling map, ending at
-    the input points. If a build does not expose the chain, or returns a
-    different number of points than it was given, we fall back to the nearest
-    token — coarser, but it keeps the stage runnable instead of crashing on a
-    library detail. Which path ran is printed once.
-    """
-    depth = 0
-    while hasattr(point, "keys") and "pooling_parent" in point.keys():
-        parent = point.pop("pooling_parent")
-        inverse = point.pop("pooling_inverse")
-        parent.feat = torch.cat([parent.feat, point.feat[inverse]], dim=-1)
-        point = parent
-        depth += 1
-
-    feat, coord = point.feat.float(), point.coord.float()
-    if len(feat) == len(want_xyz) and torch.allclose(coord, want_xyz, atol=1e-4):
-        if not _UPCAST_NOTE:
-            _UPCAST_NOTE.append("chain")
-            print(f"[gw-sn] dense read-out: pooling chain, depth {depth}, "
-                  f"{feat.shape[1]}-d per point")
-        return feat
-
-    # nearest-token fallback (scipy on the CPU: 1-NN over a window's tokens is
-    # milliseconds, and this path is not expected to run at all)
-    from scipy.spatial import cKDTree
-    if not _UPCAST_NOTE:
-        _UPCAST_NOTE.append("nn")
-        print(f"[gw-sn] dense read-out: NEAREST-TOKEN fallback "
-              f"(chain depth {depth}, {len(feat):,} tokens for "
-              f"{len(want_xyz):,} points, {feat.shape[1]}-d) — the pooling "
-              f"chain was unusable, features are token-resolution")
-    j = cKDTree(coord.detach().cpu().numpy()).query(
-        want_xyz.detach().cpu().numpy())[1]
-    return feat[torch.as_tensor(j, device=feat.device)]
+_NOTE: list[str] = []
 
 
 @torch.no_grad()
-def encode_points(enc, scene: SceneStore, idx: torch.Tensor):
-    """Per-point features for the scene points `idx`, as one Sonata crop.
+def encode_points(enc, chunk: "Chunk", idx: torch.Tensor):
+    """Per-point features for the chunk points `idx`, as one Sonata crop.
 
-    The crop is centre-shifted exactly as the pretrained CenterShift does (xy to
-    the mean, z to the minimum) — the same convention the walker's sphere crops
-    use, so a checkpoint trained here sees the inputs it was trained on.
+    Centre-shifted exactly as the pretrained CenterShift does (xy to the mean, z
+    to the minimum), because a crop shifted some other way is a crop the
+    pretrained weights have never seen and the failure is silent.
     """
-    pts = scene.xyz[idx]
+    pts = chunk.xyz[idx]
     shift = torch.cat([pts[:, :2].mean(0), pts[:, 2].min()[None]])
     local = pts - shift[None, :]
-    feat = torch.cat([local, torch.zeros_like(local), scene.normal[idx]], 1)
+    feat = torch.cat([local, torch.zeros_like(local), chunk.normal[idx]], 1)
     data = dict(
         coord=local,
         grid_coord=((local - local.min(0).values[None, :]) / GRID).floor().long(),
         feat=feat,
-        offset=torch.tensor([len(idx)], device=scene.device, dtype=torch.long),
+        offset=torch.tensor([len(idx)], device=chunk.device, dtype=torch.long),
     )
-    return upcast(enc(data), local)
+    return upcast(enc(data), local, note=_NOTE)
 
 
 class StemHead(nn.Module):
@@ -217,8 +187,37 @@ def voxel_unique(xyz: np.ndarray, voxel: float) -> np.ndarray:
     return np.unique(flat, return_index=True)[1]
 
 
+class Chunk:
+    """The scene as a flat chunk of points on the device.
+
+    Deliberately NOT a spatial store with a ball index: this model never asks
+    "what is within r of this moving point". It asks for a rectangle once per
+    window, which `Band`'s bucket index answers on the CPU, and after that the
+    points are just rows.
+    """
+
+    def __init__(self, xyz: np.ndarray, normal: np.ndarray, device="cuda"):
+        self.device = device
+        self.xyz = torch.from_numpy(xyz.astype(np.float32)).to(device)
+        self.normal = torch.from_numpy(normal.astype(np.float32)).to(device)
+
+
+def load_chunk(tiles_dir=None, device=DEVICE):
+    tiles_dir = Path(tiles_dir or PREP / "tiles")
+    xs, ns = [], []
+    for q in sorted(tiles_dir.glob("tile_*.npz")):
+        d = np.load(q)
+        xs.append(d["xyz"].astype(np.float32))
+        ns.append(d["normal"].astype(np.float32))
+    if not xs:
+        raise SystemExit(f"[sn] no tiles in {tiles_dir} — run bw_prep first")
+    xyz, normal = np.concatenate(xs), np.concatenate(ns)
+    print(f"[sn] chunk: {len(xyz):,} pts from {len(xs)} tiles")
+    return Chunk(xyz, normal, device=device)
+
+
 class Band:
-    """The breast-height slice of the scene, deduplicated and indexed.
+    """The breast-height slice of the chunk, deduplicated and indexed.
 
     Everything outside it is dropped before the model ever runs: the ground
     carries no stem, the crown cannot say where a trunk meets the soil, and
@@ -226,12 +225,12 @@ class Band:
     affordable where 199,278 sphere encodes were not.
     """
 
-    def __init__(self, scene: SceneStore, dem: Dem, lo=BAND_LO, hi=BAND_HI,
-                 voxel=VOXEL, cell=None, chunk=1 << 20):
-        xyz = scene.xyz
+    def __init__(self, chunk: Chunk, dem: Dem, lo=BAND_LO, hi=BAND_HI,
+                 voxel=VOXEL, cell=None, block=1 << 20):
+        xyz = chunk.xyz
         keep = []
-        for s in range(0, len(xyz), chunk):
-            blk = xyz[s:s + chunk]
+        for s in range(0, len(xyz), block):
+            blk = xyz[s:s + block]
             h = blk[:, 2] - dem.height(blk[:, :2])
             keep.append(torch.nonzero((h >= lo) & (h <= hi), as_tuple=True)[0] + s)
         keep = torch.cat(keep) if keep else torch.zeros(0, dtype=torch.long,
@@ -242,9 +241,9 @@ class Band:
         self.xyz = pts[u]
         self.n_raw = int(len(keep))
         self.buckets = Buckets(self.xyz[:, :2], cell or max(WIN / 2.0, 1.0))
-        print(f"[gw-sn] band {lo}-{hi} m: {len(xyz):,} scene pts -> "
+        print(f"[sn] band {lo}-{hi} m: {len(xyz):,} chunk pts -> "
               f"{self.n_raw:,} in band -> {len(self.xyz):,} after {voxel} m "
-              f"dedup ({len(self.xyz)/max(len(xyz),1)*100:.1f}% of the scene)")
+              f"dedup ({len(self.xyz)/max(len(xyz),1)*100:.1f}% of the chunk)")
 
     def window(self, cx, cy, win=WIN, pad=PAD):
         """(crop positions, inner mask) for the square centred at (cx, cy).
@@ -269,7 +268,7 @@ class Band:
 # ---------------------------------------------------------------------------
 # targets
 # ---------------------------------------------------------------------------
-def nearest_base(xy: torch.Tensor, bases_xy: torch.Tensor, chunk: int = 1 << 14):
+def nearest_base(xy: torch.Tensor, bases_xy: torch.Tensor, block: int = 1 << 14):
     """Horizontal distance to the nearest labelled base, and which one.
 
     Chunked so a 250k-point window against 758 bases never allocates the full
@@ -277,11 +276,11 @@ def nearest_base(xy: torch.Tensor, bases_xy: torch.Tensor, chunk: int = 1 << 14)
     """
     d_out = torch.empty(len(xy), device=xy.device)
     j_out = torch.empty(len(xy), dtype=torch.long, device=xy.device)
-    for s in range(0, len(xy), chunk):
-        d = torch.cdist(xy[s:s + chunk], bases_xy)
+    for s in range(0, len(xy), block):
+        d = torch.cdist(xy[s:s + block], bases_xy)
         m, j = d.min(1)
-        d_out[s:s + chunk] = m
-        j_out[s:s + chunk] = j
+        d_out[s:s + block] = m
+        j_out[s:s + block] = j
     return d_out, j_out
 
 
@@ -306,7 +305,6 @@ def vote(xy: np.ndarray, p: np.ndarray, off: np.ndarray, p_thresh=P_THRESH,
     """
     from scipy import ndimage
     from scipy.spatial import cKDTree
-    from baseline import peaks
 
     k = p >= p_thresh
     if k.sum() < 1:
@@ -358,7 +356,7 @@ def vote(xy: np.ndarray, p: np.ndarray, off: np.ndarray, p_thresh=P_THRESH,
 
 def split_x(labels=None):
     """The train/val boundary in local x, as prep_scene recorded it."""
-    lab = np.load(BW / "labels.npz") if labels is None else labels
+    lab = np.load(PREP / "labels.npz") if labels is None else labels
     return float(lab["split_x"])
 
 

@@ -184,25 +184,6 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/geowalker/height.py"]
 
-  # Dense stem head on the frozen encoder: per point, is this a tree and where
-  # is its base. One pass per window instead of 9 encodes per seed, and every
-  # point votes -- the walker's median detection had ONE vote.
-  geowalker_stem_train:
-    <<: *gpu
-    image: carbonpoly/geowalker
-    env_file: [.env]
-    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
-    volumes: [ ./data:/data, ./results:/results ]
-    command: ["python", "/app/geowalker/stem_train.py"]
-
-  geowalker_stem_infer:
-    <<: *gpu
-    image: carbonpoly/geowalker
-    env_file: [.env]
-    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
-    volumes: [ ./data:/data, ./results:/results ]
-    command: ["python", "/app/geowalker/stem_infer.py"]
-
   # the control: classical, training-free tree detection on the same ground,
   # scored by the same matcher. CPU, minutes. Answers "is the network actually
   # beating a density peak and a canopy local maximum?" -- which nothing in this
@@ -224,6 +205,42 @@ services:
     environment: { DATA_DIR: /data, RESULTS_DIR: /results }
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/geowalker/treehead.py"]
+
+  # ---- StemNet: a dense chunk model, no walk ------------------------------
+  # Per point: is this a tree stem, and the horizontal offset to its base. One
+  # encoder pass per window over the breast-height slice, then the shifted
+  # points are clustered -- so a detection's score is the vote mass that agreed
+  # on it. Shares only the prepared scene, the encoder and the matcher with the
+  # walker tracks; everything shared lives in common/.
+  stemnet_build:
+    build: { context: ., dockerfile: stemnet/Dockerfile }
+    image: carbonpoly/stemnet
+    command: ["true"]
+
+  # CPU self-check: band, window tiling, targets, votes, dense read-out, with
+  # Sonata mocked. Seconds, no data, no GPU.
+  stemnet_test:
+    image: carbonpoly/stemnet
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/tests/test_stemnet.py"]
+
+  stemnet_train:
+    <<: *gpu
+    image: carbonpoly/stemnet
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet/train.py"]
+
+  stemnet_infer:
+    <<: *gpu
+    image: carbonpoly/stemnet
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet/infer.py"]
 
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:

@@ -12,6 +12,10 @@ RUN pip install --no-cache-dir cloth-simulation-filter || true
 
 COPY common /app/common
 COPY basewalker/poderevka.csv /app/poderevka.csv
+# The densely attributed patch: 392 of those trees with a species and a
+# girth. Read by common/patch.py, so it belongs to the shared prep rather
+# than to whichever model happens to be scored on it.
+COPY basewalker/poderevka_attributes.csv /app/poderevka_attributes.csv
 COPY sonata/sonata_lib.py /app/sonata_lib.py
 COPY basewalker/prep_scene.py /app/prep_scene.py
 COPY basewalker/walker.py /app/walker.py
