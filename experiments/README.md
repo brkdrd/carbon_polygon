@@ -583,6 +583,39 @@ in 3-D but ~0.15 m from it in plan view; the base's z comes from the DEM, so the
 head never predicts it and the target is a short, low-variance 2-D vector
 instead of the walker's 8 m trajectory.
 
+**The terrain is handled explicitly, because this scene is a hillside.** The
+z handed to the encoder is **height above ground**, not raw z (`SN_DETREND=1`,
+the default). A crop is 20 m wide and the pretrained CenterShift subtracts a
+single `z.min()` from it, so with raw z an uphill trunk arrives at local
+z 8–12 m and an identical downhill trunk at 0–4 m — same object, two completely
+different inputs, and nothing tells the encoder where the ground is. Subtracting
+the DEM costs almost nothing geometrically: the shift depends only on (x, y) and
+a trunk occupies essentially one (x, y), so it translates **rigidly** and its
+shape is preserved exactly. What flattens is the ground, which is what we wanted
+gone. (Normals are left describing the real surface — a trunk's is horizontal
+and unaffected, and the band starts at 0.3 m so there is little ground left to
+disagree about.) A head trained one way refuses to run the other way rather than
+be fed a z convention it never learned.
+
+Both stages print the terrain before they do anything:
+
+```
+[sn] relief: the scene spans 48.2 m of ground elevation | within one 20 m crop,
+     p50 1.4 m p95 6.1 m max 11.3 m
+[sn] DEM vs 392 surveyed elevations (datum offset -0.11 m removed):
+     IQR 0.18 m | p5 -0.37 p95 +0.41 m | 4% beyond 0.5 m
+```
+
+The second line is the one that can invalidate everything downstream: the band,
+the labels' z and the detrending are all measured **from** the DEM, so a DEM
+that is wrong on a slope slides the slab off the stems and no amount of training
+recovers it. The survey's own levelled elevations on the 392 attributed trees are
+the only independent check available, and a constant offset is a vertical datum
+difference rather than an error, so the median is removed and the **spread** is
+what gets reported. If the IQR approaches the band thickness the stage says so
+and tells you to widen `SN_BAND_LO/HI` or rebuild the DEM with
+`BW_DEM_METHOD=csf FORCE_BW_PREP=1`.
+
 **Why it is cheap.** Only the `SN_BAND_LO`..`SN_BAND_HI` slice above the
 DEM is ever encoded — the ground carries no stem and the crown cannot say where
 a trunk meets the soil — and that slice is voxel-deduplicated at `SN_VOXEL`,
@@ -614,7 +647,8 @@ Knobs: `SN_WIN` (16 m predicted square), `SN_PAD` (2 m context ring,
 encoded but not predicted on, so inner squares tile exactly and no point votes
 twice), `SN_BAND_LO/HI` (0.3/4.0 m), `SN_NEAR_R` (1.0 m), `SN_VOXEL`
 (0.05 m), `SN_PTS` (250k per pass), `SN_P` (0.5, a point votes above
-this), `SN_VOTE_CELL/SEP/R/MIN` (0.1 / 0.6 / 0.3 / 6.0), `SN_ITERS`,
+this), `SN_VOTE_CELL/SEP/R/MIN` (0.1 / 0.6 / 0.3 / 6.0), `SN_DETREND` (1),
+`SN_ITERS`,
 `SN_LR`, `SN_W_OFF`, `SN_EVAL`, `SN_EVAL_WIN`.
 
 

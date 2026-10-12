@@ -62,9 +62,9 @@ def run_region(enc, head, chunk, band, centres):
                   f"the whole window", flush=True)
             sel = np.random.default_rng(k).permutation(len(pos))[:S.PTS_CAP]
             pos, inner = pos[sel], inner[sel]
-        idx = band.idx[torch.as_tensor(pos, device=chunk.device)]
+        idx, zcol = band.crop(pos)
         with torch.no_grad():
-            feat = S.encode_points(enc, chunk, idx)
+            feat = S.encode_points(enc, chunk, idx, zcol)
             logit, off = head(feat)
         m = torch.as_tensor(inner, device=chunk.device)
         xs.append(chunk.xyz[idx][m][:, :2].cpu().numpy())
@@ -210,6 +210,7 @@ def main():
 
     chunk = S.load_chunk(device=dev)
     dem = S.Dem(S.PREP / "dem.npz", device=dev)
+    terrain = dict(relief=S.relief(), dem_vs_survey=S.dem_check(dem, device=dev))
     band = S.Band(chunk, dem)
     enc = S.load_encoder(device=dev)
 
@@ -219,6 +220,13 @@ def main():
     head.eval()
     print(f"[sn] head from {S.CKPT} @ it {ck.get('it','?')} "
           f"(train-time val F1 {ck.get('val',{}).get('f1',float('nan')):.3f})")
+    trained_detrend = ck.get("cfg", {}).get("detrend")
+    if trained_detrend is not None and bool(trained_detrend) != S.DETREND:
+        raise SystemExit(
+            f"[sn] this head was trained with detrend={trained_detrend} and "
+            f"inference has SN_DETREND={int(S.DETREND)} — it would be fed a "
+            f"different z convention than it learned. Set SN_DETREND="
+            f"{int(bool(trained_detrend))} or retrain.")
 
     xy, p, off, n_enc, secs = run_region(enc, head, chunk, band, centres)
     print(f"[sn] {len(xy):,} inner band points | "
@@ -245,9 +253,10 @@ def main():
                checkpoint=dict(it=int(ck.get("it", 0)),
                                val=ck.get("val", {}), feat_dim=int(ck["feat_dim"])),
                cfg=dict(band_lo=S.BAND_LO, band_hi=S.BAND_HI, near_r=S.NEAR_R,
-                        win=S.WIN, pad=S.PAD, voxel=S.VOXEL,
+                        win=S.WIN, pad=S.PAD, voxel=S.VOXEL, detrend=S.DETREND,
                         vote_cell=S.VOTE_CELL, vote_sep=S.VOTE_SEP,
                         vote_r=S.VOTE_R, vote_min=S.VOTE_MIN),
+               terrain=terrain,
                patch=info, metrics={})
     for r in (0.5, 1.0):
         m = S.match_metrics(det, mass, gt[:, :2], r)

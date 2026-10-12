@@ -267,6 +267,90 @@ def test_stem_train_window_step_runs_end_to_end():
         assert hit >= 4, hit
 
 
+def _sloped_scene(tmp, rng, slope=0.35, trunks=((-6.0, 0.0), (6.0, 0.0))):
+    """The same stand on a hillside: ground z = slope * x, two identical trunks
+    12 m apart along the fall line, so one sits ~4 m below the other."""
+    import net as SN
+    parts = []
+    for cx, cy in trunks:
+        n = 3000
+        t = rng.uniform(0, 2 * np.pi, n)
+        r = 0.15 * np.sqrt(rng.uniform(0.5, 1.0, n))
+        g = slope * cx
+        parts.append(np.column_stack([cx + r * np.cos(t), cy + r * np.sin(t),
+                                      g + rng.uniform(0.0, 10.0, n)]))
+    n = 30000
+    gx = rng.uniform(-12, 12, n)
+    parts.append(np.column_stack([gx, rng.uniform(-12, 12, n),
+                                  slope * gx + rng.normal(0, 0.01, n)]))
+    xyz = np.concatenate(parts).astype(np.float32)
+    nrm = np.zeros_like(xyz); nrm[:, 2] = 1.0
+    # an exact DEM for that plane, on the same grid convention prep_scene uses
+    cell, x0, y0, ny, nx = 0.5, -16.0, -16.0, 64, 64
+    gxs = x0 + np.arange(nx) * cell
+    z = np.repeat((slope * gxs)[None, :], ny, axis=0).astype(np.float32)
+    dem_p = Path(tmp) / "dem_slope.npz"
+    np.savez(dem_p, z=z, x0=x0, y0=y0, cell=cell)
+    chunk = SN.Chunk(xyz, nrm, device="cpu")
+    return chunk, SN.Dem(dem_p, device="cpu"), np.array(trunks)
+
+
+def test_detrending_makes_two_trunks_at_different_elevations_identical():
+    """The bug this guards: one `z.min()` for a 20 m crop means that, on a
+    slope, an uphill trunk reaches the encoder at local z 8-12 m and an
+    identical downhill trunk at 0-4 m. Same object, different input, and the
+    encoder cannot see where the ground is. Detrended, the two crops must agree.
+    """
+    import tempfile
+    import net as SN
+    rng = np.random.default_rng(7)
+    with tempfile.TemporaryDirectory() as tmp:
+        chunk, dem, trunks = _sloped_scene(tmp, rng)
+        band = SN.Band(chunk, dem, lo=0.3, hi=4.0, voxel=0.05)
+
+        got = []
+        for cx, cy in trunks:
+            pos, inner = band.window(cx, cy, win=4.0, pad=0.0)
+            assert inner.any(), (cx, cy)
+            pos = pos[inner]
+            idx, zcol = band.crop(pos)
+            assert zcol is not None, "SN_DETREND is off in this environment"
+            # the z the encoder is handed, before the crop's own centre shift
+            got.append(np.sort(zcol.numpy()))
+
+        # both trunks occupy the same band slab once the terrain is removed
+        for z in got:
+            assert 0.3 - 1e-4 <= z.min() and z.max() <= 4.0 + 1e-4, (z.min(), z.max())
+        lo_a, hi_a = got[0].min(), got[0].max()
+        lo_b, hi_b = got[1].min(), got[1].max()
+        assert abs(lo_a - lo_b) < 0.1 and abs(hi_a - hi_b) < 0.1, (got[0], got[1])
+
+        # and the control: raw z would have put the two crops metres apart,
+        # which is what the old code fed the encoder
+        raw = []
+        for cx, cy in trunks:
+            pos, inner = band.window(cx, cy, win=4.0, pad=0.0)
+            idx, _ = band.crop(pos[inner])
+            raw.append(float(chunk.xyz[idx][:, 2].min()))
+        assert abs(raw[0] - raw[1]) > 3.0, \
+            f"the toy slope is too gentle to be testing anything: {raw}"
+
+
+def test_relief_reports_what_sits_inside_one_crop():
+    """The number that says whether this scene is a hillside or a table — and
+    it must measure the crop, not the whole scene, because the crop is what a
+    single z-shift has to cover."""
+    import tempfile
+    import net as SN
+    rng = np.random.default_rng(8)
+    with tempfile.TemporaryDirectory() as tmp:
+        _c, _d, _t = _sloped_scene(tmp, rng, slope=0.35)
+        out = SN.relief(Path(tmp) / "dem_slope.npz", win=10.0, pad=0.0)
+    # a 0.35 grade over 10 m is 3.5 m of ground inside one crop
+    assert abs(out["crop_span_p50_m"] - 3.5) < 0.6, out
+    assert out["scene_relief_m"] > 10.0, out
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

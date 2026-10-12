@@ -54,7 +54,7 @@ def save(path, head, opt, it, val, feat_dim):
                     val=val, feat_dim=feat_dim,
                     cfg=dict(band_lo=S.BAND_LO, band_hi=S.BAND_HI,
                              near_r=S.NEAR_R, voxel=S.VOXEL, win=S.WIN,
-                             pad=S.PAD)), path)
+                             pad=S.PAD, detrend=S.DETREND)), path)
 
 
 def window_batch(band, centres, rng, cap=None):
@@ -72,8 +72,8 @@ def window_batch(band, centres, rng, cap=None):
 
 def forward_window(enc, head, chunk, band, pos, inner, bases_xy, train=True):
     """Encode one window, predict, and return (loss parts, predictions)."""
-    idx = band.idx[torch.as_tensor(pos, device=chunk.device)]
-    feat = S.encode_points(enc, chunk, idx)
+    idx, zcol = band.crop(pos)
+    feat = S.encode_points(enc, chunk, idx, zcol)
     xy = chunk.xyz[idx][:, :2]
     is_stem, off_t = S.targets(xy, bases_xy)
     m = torch.as_tensor(inner, device=chunk.device)
@@ -108,8 +108,8 @@ def evaluate(enc, head, chunk, band, centres, val_bases, match_r=MATCH_R):
         if len(pos) > S.PTS_CAP:
             sel = np.random.default_rng(0).permutation(len(pos))[:S.PTS_CAP]
             pos, inner = pos[sel], inner[sel]
-        idx = band.idx[torch.as_tensor(pos, device=chunk.device)]
-        feat = S.encode_points(enc, chunk, idx)
+        idx, zcol = band.crop(pos)
+        feat = S.encode_points(enc, chunk, idx, zcol)
         logit, off = head(feat)
         m = torch.as_tensor(inner, device=chunk.device)
         xy = chunk.xyz[idx][:, :2]
@@ -159,6 +159,10 @@ def main():
 
     chunk = S.load_chunk(device=dev)
     dem = S.Dem(S.PREP / "dem.npz", device=dev)
+    # the terrain, before anything is trained on it: how much ground elevation
+    # sits inside one crop, and whether the DEM is really the ground
+    S.relief()
+    S.dem_check(dem, device=dev)
     band = S.Band(chunk, dem)
     enc = S.load_encoder(device=dev)
 
@@ -183,9 +187,9 @@ def main():
 
     # the head's width is whatever the encoder's dense read-out turns out to be
     pos, inner, _ = window_batch(band, tr_centres, rng)
-    idx = band.idx[torch.as_tensor(pos, device=dev)]
+    idx, zcol = band.crop(pos)
     with torch.no_grad():
-        feat_dim = int(S.encode_points(enc, chunk, idx).shape[1])
+        feat_dim = int(S.encode_points(enc, chunk, idx, zcol).shape[1])
     print(f"[sn] dense feature dim {feat_dim}")
 
     head = S.StemHead(feat_dim).to(dev)

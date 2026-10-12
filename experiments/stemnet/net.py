@@ -85,6 +85,7 @@ VOTE_CELL = float(os.environ.get("SN_VOTE_CELL", "0.1"))
 VOTE_SEP = float(os.environ.get("SN_VOTE_SEP", "0.6"))  # two stems this far apart
 VOTE_R = float(os.environ.get("SN_VOTE_R", "0.3"))     # voters pooled per peak
 VOTE_MIN = float(os.environ.get("SN_VOTE_MIN", "6.0"))  # minimum vote mass
+DETREND = os.environ.get("SN_DETREND", "1") != "0"   # z -> height above ground
 VAL_MARGIN = float(os.environ.get("BW_VAL_MARGIN", "10.0"))
 DEVICE = os.environ.get("SN_DEVICE", "cuda")
 
@@ -96,14 +97,30 @@ _NOTE: list[str] = []
 
 
 @torch.no_grad()
-def encode_points(enc, chunk: "Chunk", idx: torch.Tensor):
+def encode_points(enc, chunk: "Chunk", idx: torch.Tensor, zcol=None):
     """Per-point features for the chunk points `idx`, as one Sonata crop.
 
-    Centre-shifted exactly as the pretrained CenterShift does (xy to the mean, z
-    to the minimum), because a crop shifted some other way is a crop the
-    pretrained weights have never seen and the failure is silent.
+    DETRENDED (`zcol` = height above ground, which `Band.crop` supplies unless
+    SN_DETREND=0). This scene has serious relief, and a crop is 20 m wide: with
+    raw z and one `z.min()` for the whole crop, an uphill trunk arrives at local
+    z 8-12 m and an identical downhill trunk at 0-4 m. Same object, two
+    completely different inputs, and the encoder has no way to know where the
+    ground is — the single worst thing that could happen to a stem detector.
+
+    Subtracting the DEM fixes it and costs almost nothing geometrically: the
+    shift depends only on (x, y), and a trunk occupies essentially one (x, y),
+    so it translates RIGIDLY — its shape is preserved exactly. What flattens is
+    the ground, which is what we wanted gone. (The normals are left on the real
+    surface: a trunk's normal is horizontal and unaffected, and the band starts
+    at 0.3 m so there is little ground left to disagree about.)
+
+    Then centre-shifted exactly as the pretrained CenterShift does (xy to the
+    mean, z to the minimum), because a crop shifted some other way is a crop
+    the pretrained weights have never seen and the failure is silent.
     """
     pts = chunk.xyz[idx]
+    if zcol is not None:
+        pts = torch.cat([pts[:, :2], zcol[:, None]], 1)
     shift = torch.cat([pts[:, :2].mean(0), pts[:, 2].min()[None]])
     local = pts - shift[None, :]
     feat = torch.cat([local, torch.zeros_like(local), chunk.normal[idx]], 1)
@@ -228,22 +245,40 @@ class Band:
     def __init__(self, chunk: Chunk, dem: Dem, lo=BAND_LO, hi=BAND_HI,
                  voxel=VOXEL, cell=None, block=1 << 20):
         xyz = chunk.xyz
-        keep = []
+        keep, hs = [], []
         for s in range(0, len(xyz), block):
             blk = xyz[s:s + block]
             h = blk[:, 2] - dem.height(blk[:, :2])
-            keep.append(torch.nonzero((h >= lo) & (h <= hi), as_tuple=True)[0] + s)
-        keep = torch.cat(keep) if keep else torch.zeros(0, dtype=torch.long,
-                                                        device=xyz.device)
+            k = torch.nonzero((h >= lo) & (h <= hi), as_tuple=True)[0]
+            keep.append(k + s)
+            hs.append(h[k])
+        if keep:
+            keep, hs = torch.cat(keep), torch.cat(hs)
+        else:
+            keep = torch.zeros(0, dtype=torch.long, device=xyz.device)
+            hs = torch.zeros(0, device=xyz.device)
         pts = xyz[keep].double().cpu().numpy()
         u = voxel_unique(pts, voxel)
-        self.idx = keep[torch.as_tensor(u, device=xyz.device)]
+        ut = torch.as_tensor(u, device=xyz.device)
+        self.idx = keep[ut]
+        # height above ground, kept rather than recomputed: it selects the band
+        # AND it is the z the encoder is given, so the two can never disagree
+        self.h_t = hs[ut]
+        self.h = self.h_t.double().cpu().numpy()
         self.xyz = pts[u]
         self.n_raw = int(len(keep))
         self.buckets = Buckets(self.xyz[:, :2], cell or max(WIN / 2.0, 1.0))
         print(f"[sn] band {lo}-{hi} m: {len(xyz):,} chunk pts -> "
               f"{self.n_raw:,} in band -> {len(self.xyz):,} after {voxel} m "
               f"dedup ({len(self.xyz)/max(len(xyz),1)*100:.1f}% of the chunk)")
+        print(f"[sn] encoder z: "
+              + ("HEIGHT ABOVE GROUND (detrended)" if DETREND else
+                 "RAW z — SN_DETREND=0, so relief is inside every crop"))
+
+    def crop(self, pos):
+        """(chunk indices, ground-relative z) for the band positions `pos`."""
+        t = torch.as_tensor(pos, device=self.idx.device)
+        return self.idx[t], (self.h_t[t] if DETREND else None)
 
     def window(self, cx, cy, win=WIN, pad=PAD):
         """(crop positions, inner mask) for the square centred at (cx, cy).
@@ -352,6 +387,95 @@ def vote(xy: np.ndarray, p: np.ndarray, off: np.ndarray, p_thresh=P_THRESH,
             kept.append(i)
     out = out[kept]
     return out[:, :2], out[:, 2], out[:, 3].astype(np.int64)
+
+
+def relief(dem_npz=None, win=WIN, pad=PAD):
+    """How much ground elevation varies, over the scene and inside one crop.
+
+    The second number is the one that matters: it is exactly the error the
+    encoder would be fed if the crop were not detrended, because that much
+    terrain would sit inside a single `z.min()` shift. Printed rather than
+    asserted — the detrending removes it either way, but a reader of a score
+    should know whether this scene is a hillside or a table.
+    """
+    d = np.load(dem_npz or PREP / "dem.npz", allow_pickle=True)
+    z, cell = d["z"].astype(np.float64), float(d["cell"])
+    ok = np.isfinite(z)
+    if not ok.any():
+        print("[sn] DEM is empty — cannot report relief")
+        return {}
+    k = max(1, int(round((win + 2 * pad) / cell)))
+    from scipy import ndimage
+    f = np.where(ok, z, np.nan)
+    hi = ndimage.maximum_filter(np.where(ok, z, -np.inf), size=k, mode="nearest")
+    lo = ndimage.minimum_filter(np.where(ok, z, np.inf), size=k, mode="nearest")
+    span = np.where(ok, hi - lo, np.nan)
+    span = span[np.isfinite(span)]
+    out = dict(scene_relief_m=float(np.nanmax(f) - np.nanmin(f)),
+               crop_span_p50_m=float(np.percentile(span, 50)) if len(span) else float("nan"),
+               crop_span_p95_m=float(np.percentile(span, 95)) if len(span) else float("nan"),
+               crop_span_max_m=float(span.max()) if len(span) else float("nan"),
+               crop_m=float(win + 2 * pad))
+    print(f"[sn] relief: the scene spans {out['scene_relief_m']:.1f} m of ground "
+          f"elevation | within one {out['crop_m']:.0f} m crop, "
+          f"p50 {out['crop_span_p50_m']:.1f} m p95 {out['crop_span_p95_m']:.1f} m "
+          f"max {out['crop_span_max_m']:.1f} m")
+    if out["crop_span_p95_m"] > 2.0 and not DETREND:
+        print("[sn] !! SN_DETREND=0 with that much relief inside a crop: the "
+              "encoder sees terrain, not trees. This will not work.")
+    return out
+
+
+def dem_check(dem, device=None):
+    """Is the DEM actually the ground, on this terrain?
+
+    The band, the labels' z and the detrending are all measured FROM the DEM, so
+    a DEM that is wrong on a slope moves the slab off the stems and nothing
+    downstream can recover. The survey's own levelled elevations are the only
+    independent check available: 392 attributed trees with a measured z.
+
+    A constant offset is a vertical datum difference, not an error, so the
+    median is removed and the SPREAD is what is reported.
+    """
+    try:
+        from common import patch as P
+        attrs = P.load_attributes()
+        xy = P.to_local(attrs["lat"], attrs["lon"])
+        zs = np.asarray(attrs["z"], np.float64)
+    except SystemExit as e:
+        print(f"[sn] DEM check skipped: {e}")
+        return {}
+    except Exception as e:                       # noqa: BLE001 - diagnostic only
+        print(f"[sn] DEM check skipped: {type(e).__name__}: {e}")
+        return {}
+    ok = np.isfinite(zs)
+    if ok.sum() < 20:
+        print("[sn] DEM check skipped: too few surveyed elevations")
+        return {}
+    xy, zs = xy[ok], zs[ok]
+    t = torch.from_numpy(xy.astype(np.float32))
+    if device is not None:
+        t = t.to(device)
+    g = dem.height(t).detach().cpu().numpy().astype(np.float64)
+    r = zs - g
+    off = float(np.median(r))
+    r = r - off
+    q = np.percentile(r, [5, 25, 50, 75, 95])
+    out = dict(n=int(len(r)), datum_offset_m=off,
+               spread_p5_m=float(q[0]), spread_p25_m=float(q[1]),
+               spread_p75_m=float(q[3]), spread_p95_m=float(q[4]),
+               iqr_m=float(q[3] - q[1]),
+               frac_beyond_half_m=float((np.abs(r) > 0.5).mean()))
+    print(f"[sn] DEM vs {out['n']} surveyed elevations (datum offset "
+          f"{off:+.2f} m removed): IQR {out['iqr_m']:.2f} m | "
+          f"p5 {q[0]:+.2f} p95 {q[4]:+.2f} m | "
+          f"{out['frac_beyond_half_m']*100:.0f}% beyond 0.5 m")
+    if out["iqr_m"] > 0.5:
+        print(f"[sn] !! the DEM disagrees with the survey by more than the "
+              f"band is thick in places. The band ({BAND_LO}-{BAND_HI} m) may "
+              f"be sitting off the stems; widen SN_BAND_LO/HI or rebuild the "
+              f"DEM (BW_DEM_METHOD=csf, FORCE_BW_PREP=1).")
+    return out
 
 
 def split_x(labels=None):
