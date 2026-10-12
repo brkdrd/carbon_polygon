@@ -15,6 +15,7 @@
     .\run_experiments.ps1 geowalker  # GeoWalker: through-cloud distance field,
                                      # then train + infer the walker on it
     .\run_experiments.ps1 gw_infer_patch # inference on the attributed ~2 ha
+    .\run_experiments.ps1 gw_baseline    # classical control, CPU, minutes
                                          # patch only: per-tree and
                                          # per-species results
     .\run_experiments.ps1 gw_infer_head  # inference, but endpoints ranked by
@@ -135,6 +136,11 @@ function GwInferAgg { Log "GeoWalker - inference + post-walk evidence stage"
 # the stage prints itself rather than leaving to the reader.
 function GwInferPatch { Log "GeoWalker - inference on the attributed patch"
     Invoke-Stage "geowalker_infer" @("GW_INFER_REGION=patch", "GW_AGGREGATE=1") }
+# The control nobody had run: classical detection on the same ground, scored by
+# the same matcher. No GPU, no training, minutes - and it is what says whether
+# the network is earning its hours. Needs the CHM, so GwHeight runs first.
+function GwBaseline { Log "GeoWalker - classical baseline on the attributed patch"
+    Invoke-Stage "geowalker_baseline" }
 function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function GwHeight { Log "GeoWalker - canopy height vs the label criterion"; Invoke-Stage "geowalker_height" }
 function GwHead  { Log "GeoWalker - can the tree/not-tree head be trained?"; Invoke-Stage "geowalker_head" }
@@ -179,11 +185,12 @@ switch ($Target) {
     "gw_infer_head" { GwBuild; GwInferHead }
     "gw_infer_agg" { GwBuild; GwHeight; GwInferAgg }
     "gw_infer_patch" { GwBuild; GwHeight; GwInferPatch }
+    "gw_baseline" { GwBuild; GwHeight; GwBaseline }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_diag|gw_height|gw_head]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head]"
         exit 2
     }
 }

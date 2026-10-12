@@ -236,6 +236,44 @@ counts as judgeable. The footprint is the hull **or** that buffer, because a
 clearing inside the patch is surveyed ground and a detection in it is a real
 false positive.
 
+### The control: is the network beating a density peak?
+
+Nothing in this repo had ever measured that, so every GeoWalker number was
+being read without a scale. `gw_baseline` supplies one. It runs two detectors
+from the forest-inventory literature over the same tiles, inside the same patch
+footprint, and scores them with the same `match_pairs` matcher:
+
+* **stem** — slice the cloud at breast height (`GW_STEM_LO`..`GW_STEM_HI`, default
+  1–3 m above the DEM), find density peaks in plan view, then make each
+  candidate prove it goes *up*: of the 0.5 m height bins between
+  `GW_STEM_COL_LO` and `GW_STEM_COL_HI` within `GW_STEM_COL_R` of it, what
+  fraction hold a point? A trunk fills ~all of them, a parked car fills the
+  bottom two. That fraction is the detector's entire confidence score.
+* **chm** — local maxima of `gw_height`'s canopy height model, the classical
+  variable-window filter. Its blind spot is worth seeing plainly: an understory
+  sapling under an oak produces no local maximum, so a CHM detector cannot
+  count it at any threshold.
+
+```bash
+./run_experiments.sh gw_baseline        # or: run_experiments.cmd gw_baseline
+```
+
+| file | what it holds |
+| --- | --- |
+| `results/geowalker_baseline_patch_metrics.json` | every method, P/R/F1 at 0.5 m and 1.0 m |
+| `results/geowalker_baseline_patch_<method>_detections.csv` | `x,y,z,score` |
+| `results/geowalker_baseline_patch_trees.csv` | one row per GT base, a found/err column per method, plus GeoWalker's own column when `gw_infer_patch` has run |
+
+The console table that matters is **recall by stem size**, because that is where
+the target definition and the model part company: about half the surveyed stems
+in the patch are under 10 cm DBH and together carry ~4% of its basal area. A
+headline recall counts them one-for-one with a 40 cm oak; the basal-area
+weighted recall printed underneath does not. Report both.
+
+CPU only, no GPU, no training — so this is the cheap number to get first, before
+spending another 1.6 GPU-hours on a walk.
+
+
 `bw_train` **resumes**: if `data/models/basewalker_decoder.pth` exists it is
 loaded — weights, AdamW moments and the best val F1 — and `BW_ITERS` more
 iterations are trained on top, on a fresh cosine cycle from `BW_RESUME_LR`
@@ -312,6 +350,7 @@ One stage at a time (same target names in both launchers):
 | `gw_infer_agg` | the same walk read properly: best step per walker instead of the last, converging walkers counted as votes instead of suppressed, canopy-height gate from `gw_height`. Every pipeline reported in one table | GPU, same cost as `gw_infer` |
 | `gw_diag` | why recall is what it is (walk / NMS / threshold) | GPU, ~minutes |
 | `gw_infer_patch` | inference restricted to the densely attributed survey patch — 392 trees, 25 species, girth on 388, ~1.14 ha. Writes a per-tree answer sheet and a per-species recall. **These are training labels**, and the stage says so | GPU, ~1.6 h (2.9k seeds) |
+| `gw_baseline` | the control: classical training-free detection on the same patch, scored by the same matcher — breast-height density peaks confirmed by a vertical column, and CHM local maxima. Says whether the network is beating a 1990s algorithm | CPU, ~minutes |
 | `gw_height` | canopy height vs the annotators' criterion | CPU, ~minutes |
 | `gw_head` | can the tree/not-tree decision be trained on its own? | GPU, walk-bound; resumable |
 

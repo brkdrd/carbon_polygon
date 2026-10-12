@@ -520,6 +520,90 @@ def test_patch_species_join_refuses_a_distant_base():
         P.to_local = orig
 
 
+def _synthetic_stand(path, rng):
+    """A flat 20 x 20 m stand: four trunks, a parked car and a hedge.
+
+    The car and the hedge are the whole point — both are dense at breast
+    height, so plan-view density alone cannot tell them from a stem, and only
+    the vertical column can.
+    """
+    parts = []
+    for cx, cy in [(0.0, 0.0), (6.0, 0.0), (0.0, 6.0), (6.0, 6.0)]:
+        n = 4000
+        t = rng.uniform(0, 2 * np.pi, n)
+        r = 0.12 * np.sqrt(rng.uniform(0.6, 1.0, n))
+        parts.append(np.column_stack([cx + r * np.cos(t), cy + r * np.sin(t),
+                                      rng.uniform(0.0, 12.0, n)]))
+        n = 3000                                    # crown, well above the slice
+        parts.append(np.column_stack([
+            cx + rng.normal(0, 1.5, n), cy + rng.normal(0, 1.5, n),
+            rng.uniform(8.0, 12.0, n)]))
+    n = 6000                                        # car: dense, 1.4 m tall
+    parts.append(np.column_stack([rng.uniform(12.0, 16.0, n),
+                                  rng.uniform(-1.0, 1.0, n),
+                                  rng.uniform(0.0, 1.4, n)]))
+    n = 6000                                        # hedge: dense, 1.2 m tall
+    parts.append(np.column_stack([rng.uniform(-2.0, 8.0, n),
+                                  rng.uniform(11.8, 12.2, n),
+                                  rng.uniform(0.0, 1.2, n)]))
+    xyz = np.concatenate(parts).astype(np.float32)
+    np.savez(path, xyz=xyz)
+    return xyz
+
+
+def test_baseline_column_separates_a_stem_from_a_car():
+    """The classical control has to be worth comparing against: a density peak
+    at breast height is not a tree, and the verticality fraction is the only
+    thing in the detector that knows it."""
+    import tempfile
+    import baseline as B
+    rng = np.random.default_rng(0)
+    with tempfile.TemporaryDirectory() as d:
+        tile = Path(d) / "tile_0.npz"
+        _synthetic_stand(tile, rng)
+        flat = lambda xy: np.zeros(len(xy), np.float64)   # noqa: E731
+        cand, frac, dval = B.detect_stems((-3.0, 17.0, -3.0, 13.0), flat, [tile])
+
+    assert len(cand) >= 4, len(cand)
+    trunks = np.array([[0.0, 0.0], [6.0, 0.0], [0.0, 6.0], [6.0, 6.0]])
+    for cx, cy in trunks:
+        d = np.linalg.norm(cand - np.array([cx, cy]), axis=1)
+        i = int(np.argmin(d))
+        assert d[i] < 0.3, (cx, cy, d[i])
+        # a 12 m trunk fills the column; anything else is a detector bug
+        assert frac[i] > 0.8, (cx, cy, frac[i])
+
+    # every candidate on the car or the hedge must score far below a trunk
+    clutter = (cand[:, 0] > 11.0) | (cand[:, 1] > 10.0)
+    if clutter.any():
+        assert frac[clutter].max() < 0.4, frac[clutter].max()
+
+
+def test_baseline_peaks_respect_separation_and_plateaus():
+    """Two stems 1.2 m apart are two detections; a flat plateau is one, not
+    one per cell (a bare equality test against a maximum filter returns the
+    whole plateau, which would inflate the control's detection count)."""
+    import baseline as B
+    a = np.zeros((40, 40), np.float64)
+    a[20, 10] = a[20, 22] = 5.0                  # 1.2 m apart at 0.1 m cells
+    xy, v = B.peaks(a, 0.1, 0.6, 1.0, 0.0, 0.0)
+    assert len(xy) == 2, len(xy)
+    a = np.zeros((40, 40), np.float64)
+    a[18:23, 18:23] = 5.0                        # a 0.5 m flat plateau
+    xy, v = B.peaks(a, 0.1, 0.6, 1.0, 0.0, 0.0)
+    assert len(xy) == 1, len(xy)
+
+
+def test_baseline_girth_parses_a_multi_stem():
+    """The survey writes a forked tree as '29;22', and the control's size
+    bands are read from that column."""
+    import baseline as B
+    assert abs(B.girth_to_dbh("63") - 63 / np.pi) < 1e-9
+    assert abs(B.girth_to_dbh("29;22") - 29 / np.pi) < 1e-9   # thickest stem
+    assert np.isnan(B.girth_to_dbh(""))
+    assert np.isnan(B.girth_to_dbh("n/a"))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

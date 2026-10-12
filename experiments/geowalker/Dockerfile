@@ -21,6 +21,7 @@ COPY geowalker/height.py /app/geowalker/height.py
 COPY geowalker/treehead.py /app/geowalker/treehead.py
 COPY geowalker/aggregate.py /app/geowalker/aggregate.py
 COPY geowalker/patch.py /app/geowalker/patch.py
+COPY geowalker/baseline.py /app/geowalker/baseline.py
 # The densely attributed patch: 392 trees with species and girth, and the one
 # region where "which tree did we miss" has an answer. Baked in beside the stem
 # map, not mounted, because the code in this image is baked too.
