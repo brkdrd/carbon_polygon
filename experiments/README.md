@@ -659,10 +659,28 @@ cause, and reported from Sonata's attention rather than from the allocator. If
 you see that, read the `[sn] gpu ...` high-water line, not the traceback.
 
 ```bash
+./run_experiments.sh stem_test      # CPU self-check, seconds, no GPU
 ./run_experiments.sh stemnet        # test, train, val, patch
+./run_experiments.sh stem_long      # the real run: 40k iters, ~2 h
 ./run_experiments.sh stem_infer     # the held-out score, on its own
-./run_experiments.sh stem_test      # CPU self-check, seconds
 ```
+
+**How long is long enough.** `SN_ITERS` defaults to 4,000, which is ~1.3
+passes over the 3,028 train window centres and about 13 minutes on a 5090 at
+190 ms per window — a smoke test, not a trained model. A run that ends with the
+cosine schedule at 4e-6 while the classification loss is still falling has
+converged its *schedule*, not its head. `stem_long` is 40,000 iterations
+(~13 passes, ~2 h) with the eval wide enough to choose a checkpoint on, and
+starts cold, because a 13-minute head is not worth warm-starting from.
+
+Beware the training-time eval: it is what **best-F1 checkpointing selects on**,
+so it has to be wide. At the old `SN_EVAL_WIN=12` it covered 85 val bases in
+0.31 ha, which puts one standard error on recall at ±0.054 — wider than the
+entire spread of a run's eval scores (0.407-0.470 over 11 evals, sd 0.020). The
+"best" head was then the luckiest of 16 noisy draws rather than the best one.
+The default is now 48 windows (~340 bases, ±0.027) and `stem_long` uses 64
+(~450 bases, ±0.023). The honest number is still `stem_infer` over the whole
+val block, never the training eval.
 
 | file | what it holds |
 | --- | --- |
@@ -683,8 +701,9 @@ encoded but not predicted on, so inner squares tile exactly and no point votes
 twice), `SN_BAND_LO/HI` (0.3/4.0 m), `SN_NEAR_R` (1.0 m), `SN_VOXEL`
 (0.05 m), `SN_PTS` (160k per crop, a memory bound — see below), `SN_P` (0.5, a point votes above
 this), `SN_VOTE_CELL/SEP/R/MIN` (0.1 / 0.6 / 0.3 / 6.0), `SN_DETREND` (1),
-`SN_ITERS`,
-`SN_LR`, `SN_W_OFF`, `SN_EVAL`, `SN_EVAL_WIN`.
+`SN_ITERS` (4000, a smoke test — see above),
+`SN_LR`, `SN_W_OFF`, `SN_EVAL` (250), `SN_EVAL_WIN` (48 windows, which is what
+best-F1 checkpointing is selected on).
 
 
 ## Notes & caveats

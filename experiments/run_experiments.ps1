@@ -154,6 +154,13 @@ function StemTest  { Log "StemNet - CPU self-check (no GPU, no data)"
     Invoke-Stage "stemnet_test" }
 function StemTrain { BwPrep; Log "StemNet - train the dense stem head"
     Invoke-Stage "stemnet_train" }
+# 4,000 iterations is ~1.3 passes over the 3,028 train window centres and takes
+# ~13 min on a 5090: a smoke test, not a trained model. This is the real run -
+# ~13 epochs, cold (the 12-min head is not worth warm-starting from), with the
+# eval wide enough that best-F1 selection means something.
+function StemLong  { BwPrep; Log "StemNet - the long run (~2 h)"
+    Invoke-Stage "stemnet_train" @("SN_ITERS=40000", "SN_EVAL=1000",
+                                   "SN_EVAL_WIN=64", "SN_RESUME=0") }
 function StemInfer { Log "StemNet - inference on the held-out val block"
     Invoke-Stage "stemnet_infer" }
 function StemPatch { Log "StemNet - inference on the attributed patch"
@@ -206,6 +213,7 @@ switch ($Target) {
     "stem_build" { StemBuild }
     "stem_test" { StemBuild; StemTest }
     "stem_train" { StemBuild; StemTrain }
+    "stem_long" { StemBuild; StemLong }
     "stem_infer" { StemBuild; StemInfer }
     "stem_patch" { StemBuild; StemPatch }
     "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
@@ -213,7 +221,7 @@ switch ($Target) {
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_infer|stem_patch]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_infer|stem_patch]"
         exit 2
     }
 }

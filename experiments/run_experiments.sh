@@ -107,6 +107,13 @@ stem_test()  { log "StemNet — CPU self-check (no GPU, no data)"
                $RUN stemnet_test; }
 stem_train() { bw_prep; log "StemNet — train the dense stem head"
                $RUN stemnet_train; }
+# 4,000 iterations is ~1.3 passes over the 3,028 train window centres and takes
+# ~13 min on a 5090: a smoke test, not a trained model. This is the real run —
+# ~13 epochs, cold, with the eval wide enough that best-F1 selection means
+# something.
+stem_long()  { bw_prep; log "StemNet — the long run (~2 h)"
+               $RUN -e SN_ITERS=40000 -e SN_EVAL=1000 -e SN_EVAL_WIN=64 \
+                    -e SN_RESUME=0 stemnet_train; }
 stem_infer() { log "StemNet — inference on the held-out val block"
                $RUN stemnet_infer; }
 stem_patch() { log "StemNet — inference on the attributed patch"
@@ -152,17 +159,20 @@ case "${1:-all}" in
   gw_infer_agg) gw_build; gw_height; gw_infer_agg ;;
   gw_infer_patch) gw_build; gw_height; gw_infer_patch ;;
   gw_baseline) gw_build; gw_height; gw_baseline ;;
-  gw_stem_train) gw_build; gw_stem_train ;;
-  gw_stem_infer) gw_build; gw_stem_infer ;;
-  gw_stem_patch) gw_build; gw_stem_patch ;;
-  gw_stem) gw_build; gw_stem_train; gw_stem_infer; gw_stem_patch ;;
   gw_diag) gw_build; gw_diag ;;
   gw_height) gw_build; gw_height ;;
   gw_head) gw_build; gw_head ;;
+  stem_build) stem_build ;;
+  stem_test) stem_build; stem_test ;;
+  stem_train) stem_build; stem_train ;;
+  stem_long) stem_build; stem_long ;;
+  stem_infer) stem_build; stem_infer ;;
+  stem_patch) stem_build; stem_patch ;;
+  stemnet) stem_build; stem_test; stem_train; stem_infer; stem_patch ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
 gw_diag|\
 gw_height|gw_head|\
-stemnet|stem_build|stem_test|stem_train|stem_infer|stem_patch]"; exit 2 ;;
+stemnet|stem_build|stem_test|stem_train|stem_long|stem_infer|stem_patch]"; exit 2 ;;
 esac

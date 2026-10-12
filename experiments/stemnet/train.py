@@ -40,7 +40,12 @@ LR = float(os.environ.get("SN_LR", "1e-3"))
 WD = float(os.environ.get("SN_WD", "1e-4"))
 W_OFF = float(os.environ.get("SN_W_OFF", "1.0"))
 EVAL_EVERY = int(os.environ.get("SN_EVAL", "250"))
-EVAL_WINDOWS = int(os.environ.get("SN_EVAL_WIN", "12"))
+# How many val windows the training-time metric is computed over. This is what
+# BEST-F1 CHECKPOINTING IS SELECTED ON, so it has to be wide enough that the
+# selection is not picking noise: 12 windows held 85 val bases, which puts the
+# standard error on recall near 0.05 — wider than the entire spread of a run's
+# eval scores, so `best` was the luckiest draw rather than the best head.
+EVAL_WINDOWS = int(os.environ.get("SN_EVAL_WIN", "48"))
 MATCH_R = float(os.environ.get("SN_MATCH_R", "0.5"))
 RESUME = os.environ.get("SN_RESUME", "1") != "0"
 RESUME_LR = float(os.environ.get("SN_RESUME_LR", str(LR)))
