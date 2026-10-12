@@ -114,6 +114,22 @@ stem_train() { bw_prep; log "StemNet — train the dense stem head"
 stem_long()  { bw_prep; log "StemNet — the long run (~2 h)"
                $RUN -e SN_ITERS=40000 -e SN_EVAL=1000 -e SN_EVAL_WIN=64 \
                     -e SN_RESUME=0 stemnet_train; }
+# The overnight run. 150k iterations at ~190 ms/window is ~8 h; with the jitter
+# redrawn per iteration these are 150k distinct crops, not 50 passes over a
+# fixed 3,028.
+stem_full()  { bw_prep; log "StemNet — the full run (~8 h)"
+               $RUN -e SN_ITERS=150000 -e SN_EVAL=2500 -e SN_EVAL_WIN=64 \
+                    -e SN_RESUME=0 stemnet_train; }
+# Settle SN_NEAR_R before spending 8 h on it: at 1.0 m a third of all band
+# points are labelled stem, so the head learns "near a tree" rather than
+# "trunk". Two tagged short runs, identical seed, one variable. ~55 min.
+stem_near()  { bw_prep
+               log "StemNet — SN_NEAR_R=1.0 (tag _r10)"
+               $RUN -e SN_ITERS=8000 -e SN_EVAL=1000 -e SN_NEAR_R=1.0 \
+                    -e SN_TAG=_r10 -e SN_RESUME=0 stemnet_train
+               log "StemNet — SN_NEAR_R=0.5 (tag _r05)"
+               $RUN -e SN_ITERS=8000 -e SN_EVAL=1000 -e SN_NEAR_R=0.5 \
+                    -e SN_TAG=_r05 -e SN_RESUME=0 stemnet_train; }
 stem_infer() { log "StemNet — inference on the held-out val block"
                $RUN stemnet_infer; }
 stem_patch() { log "StemNet — inference on the attributed patch"
@@ -166,6 +182,8 @@ case "${1:-all}" in
   stem_test) stem_build; stem_test ;;
   stem_train) stem_build; stem_train ;;
   stem_long) stem_build; stem_long ;;
+  stem_full) stem_build; stem_full ;;
+  stem_near) stem_build; stem_near ;;
   stem_infer) stem_build; stem_infer ;;
   stem_patch) stem_build; stem_patch ;;
   stemnet) stem_build; stem_test; stem_train; stem_infer; stem_patch ;;
@@ -174,5 +192,5 @@ basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
 gw_diag|\
 gw_height|gw_head|\
-stemnet|stem_build|stem_test|stem_train|stem_long|stem_infer|stem_patch]"; exit 2 ;;
+stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch]"; exit 2 ;;
 esac

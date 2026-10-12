@@ -69,8 +69,11 @@ from common.raster import peaks  # noqa: E402
 # that every track in this repo reads. The directory is named after the stage
 # that happens to write them.
 PREP = C.DATA / "basewalker"
-CKPT = C.MODELS / "stemnet.pth"
-LAST_CKPT = C.MODELS / "stemnet_last.pth"
+# SN_TAG names a run, so two settings can be compared instead of the second
+# silently overwriting the first. Empty is the default, i.e. stemnet.pth.
+TAG = os.environ.get("SN_TAG", "")
+CKPT = C.MODELS / f"stemnet{TAG}.pth"
+LAST_CKPT = C.MODELS / f"stemnet{TAG}_last.pth"
 
 GRID = float(os.environ.get("GRID_SIZE", "0.05"))
 VOXEL = float(os.environ.get("SN_VOXEL", str(GRID)))   # band dedup resolution

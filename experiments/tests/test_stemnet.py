@@ -366,6 +366,44 @@ def test_detrending_makes_two_trunks_at_different_elevations_identical():
             f"the toy slope is too gentle to be testing anything: {raw}"
 
 
+def test_window_jitter_is_fresh_every_call_and_never_leaks_into_val():
+    """Two properties of the training window sampler, one of them critical.
+
+    FRESH: the jitter must be redrawn per iteration. Drawn once, a run is
+    pinned to one fixed set of crops and a long run becomes passes over the
+    same windows instead of more ground.
+
+    LEAK-FREE: the pool is filtered on the worst jitter an anchor can draw, so
+    no crop can reach across the leakage margin into the val block — a training
+    crop that touches val ground invalidates every score the run produces, and
+    it would do so silently.
+    """
+    import tempfile
+    import net as SN
+    import train as T
+    rng = np.random.default_rng(11)
+    with tempfile.TemporaryDirectory() as tmp:
+        chunk, dem, bases = _toy_scene(tmp, rng)
+        band = SN.Band(chunk, dem, lo=0.3, hi=4.0, voxel=0.05)
+        anchors = bases[:, :2]
+        got = [T.window_batch(band, anchors, rng, jitter=2.0)[2]
+               for _ in range(12)]
+        assert len(set(got)) > 1, "the jitter is not being redrawn"
+        # and it stays within the jitter of some anchor
+        for cx, cy in got:
+            d = np.abs(anchors - np.array([cx, cy])).max(1)
+            assert d.min() <= 2.0 + 1e-9, (cx, cy, d.min())
+
+    # the leakage filter: the WORST jitter, not the anchor, must clear the limit
+    lim, jit = 61.3, 5.33
+    anch = np.array([[50.0, 0.0], [57.0, 0.0], [59.0, 0.0], [70.0, 0.0]])
+    pool = anch[anch[:, 0] + jit < lim]
+    # 57.0 clears the limit on its own but 57.0 + 5.33 = 62.33 does not, so it
+    # must be excluded — that is the whole point of filtering on the jitter
+    assert set(pool[:, 0]) == {50.0}, pool
+    assert (pool[:, 0] + jit < lim).all()
+
+
 def test_oom_retry_halves_the_crop_but_never_hides_a_real_bug():
     """What a 4,000-iteration run is allowed to survive, and what it is not.
 

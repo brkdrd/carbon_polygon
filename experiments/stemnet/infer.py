@@ -187,15 +187,15 @@ def main():
         _s, gt, _rows, info = P.select(seeds, bases, is_val, in_margin,
                                        attrs=attrs)
         inside = P.footprint(P.to_local(attrs["lat"], attrs["lon"]))
-        tag = "_patch"
+        tag = f"{S.TAG}_patch"
     elif REGION == "val":
         gt = bases[is_val & ~in_margin]
         lo = xq + S.VAL_MARGIN / 2
         inside = lambda xy: xy[:, 0] > lo          # noqa: E731
-        tag = "_val"
+        tag = f"{S.TAG}_val"
     else:
         gt = bases[~in_margin]
-        tag = "_all"
+        tag = f"{S.TAG}_all"
     if not len(gt):
         raise SystemExit(f"[sn] region={REGION} selected no GT")
 

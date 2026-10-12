@@ -49,6 +49,9 @@ EVAL_WINDOWS = int(os.environ.get("SN_EVAL_WIN", "48"))
 MATCH_R = float(os.environ.get("SN_MATCH_R", "0.5"))
 RESUME = os.environ.get("SN_RESUME", "1") != "0"
 RESUME_LR = float(os.environ.get("SN_RESUME_LR", str(LR)))
+# "last" continues the training trajectory; "best" rewinds to the
+# highest-scoring eval, which is what you want only to fine-tune from it.
+RESUME_FROM = os.environ.get("SN_RESUME_FROM", "last")
 SEED = int(os.environ.get("SN_SEED", "0"))
 POS_W_CAP = float(os.environ.get("SN_POS_W_CAP", "20.0"))
 PROGRESS_S = float(os.environ.get("SN_PROGRESS_S", "30"))
@@ -62,9 +65,26 @@ def save(path, head, opt, it, val, feat_dim):
                              pad=S.PAD, detrend=S.DETREND)), path)
 
 
-def window_batch(band, centres, rng, cap=None):
-    """Pick one window and return its crop positions + inner mask."""
-    cx, cy = centres[rng.integers(len(centres))]
+JITTER = float(os.environ.get("SN_JITTER", str(S.WIN / 3)))
+
+
+def window_batch(band, anchors, rng, cap=None, jitter=JITTER):
+    """Pick one training window: an anchor base, offset by a FRESH jitter.
+
+    The jitter used to be drawn once before the loop, which pinned a run to one
+    fixed set of 3,028 crops — so a longer run bought more passes over the same
+    windows rather than more ground, and at 50 passes that is memorisation
+    rather than training. Redrawing it per iteration makes the crop
+    distribution continuous (a stem appears at a different place in the window
+    every time it is seen) and costs two random numbers.
+
+    The anchor pool is pre-filtered so that EVERY jitter it can draw still
+    lands left of the leakage margin; see `main`.
+    """
+    cx, cy = anchors[rng.integers(len(anchors))]
+    if jitter:
+        cx = cx + rng.uniform(-jitter, jitter)
+        cy = cy + rng.uniform(-jitter, jitter)
     pos, inner = band.window(cx, cy)
     cap = cap or S.PTS_CAP
     if len(pos) > cap:
@@ -228,12 +248,12 @@ def main():
     enc = S.load_encoder(device=dev)
     S.gpu_report(" after setup")
 
-    # training windows: centred on train bases, jittered, and never allowed to
-    # reach across the margin into the val block
+    # Training windows are anchored on train bases and jittered fresh every
+    # iteration. The anchor pool is filtered on the WORST jitter it can draw,
+    # not on the anchor itself, so no crop can ever reach across the leakage
+    # margin into the val block however the dice fall.
     lim = xq - S.VAL_MARGIN / 2 - S.WIN / 2 - S.PAD
-    jit = rng.uniform(-S.WIN / 3, S.WIN / 3, size=(len(tr_bases), 2))
-    tr_centres = tr_bases[:, :2] + jit
-    tr_centres = tr_centres[tr_centres[:, 0] < lim]
+    tr_centres = tr_bases[tr_bases[:, 0] + JITTER < lim][:, :2]
     if not len(tr_centres):
         raise SystemExit("[sn] no train windows fit left of the margin")
     va_lo = xq + S.VAL_MARGIN / 2 + S.WIN / 2
@@ -242,8 +262,10 @@ def main():
         raise SystemExit("[sn] no val windows fit right of the margin")
     ev_centres = va_c[np.linspace(0, len(va_c) - 1,
                                   min(EVAL_WINDOWS, len(va_c))).astype(int)]
-    print(f"[sn] {len(tr_centres)} train window centres (x < {lim:.1f}) | "
-          f"{len(ev_centres)} eval windows")
+    print(f"[sn] {len(tr_centres)} train anchors (x + {JITTER:.1f} m jitter "
+          f"< {lim:.1f}) | {len(ev_centres)} eval windows holding "
+          f"{int(((np.abs(va_bases[:, :1] - ev_centres[:, 0]) <= S.WIN / 2) & (np.abs(va_bases[:, 1:2] - ev_centres[:, 1]) <= S.WIN / 2)).any(1).sum())} "
+          f"val bases")
 
     tr_xy = torch.from_numpy(tr_bases[:, :2].astype(np.float32)).to(dev)
 
@@ -258,20 +280,33 @@ def main():
     head = S.StemHead(feat_dim).to(dev)
     opt = torch.optim.AdamW(head.parameters(), lr=LR, weight_decay=WD)
     it0, best_f1 = 0, -1.0
-    if RESUME and S.CKPT.exists():
-        ck = torch.load(S.CKPT, map_location=dev, weights_only=False)
+    if RESUME and (S.LAST_CKPT.exists() or S.CKPT.exists()):
+        # The BEST head is the one worth keeping; the LAST one is the training
+        # state worth continuing. Resuming from `best` rewinds the optimiser to
+        # whichever earlier iteration happened to score well and re-covers
+        # ground already walked — on an interrupted overnight run that is hours
+        # thrown away, and the "best" it rewinds to may itself be an eval fluke.
+        src = (S.LAST_CKPT if RESUME_FROM != "best" and S.LAST_CKPT.exists()
+               else S.CKPT)
+        ck = torch.load(src, map_location=dev, weights_only=False)
         if int(ck.get("feat_dim", feat_dim)) != feat_dim:
             raise SystemExit(
-                f"[sn] {S.CKPT} was trained on {ck['feat_dim']}-d features, "
+                f"[sn] {src} was trained on {ck['feat_dim']}-d features, "
                 f"this encoder gives {feat_dim} — delete it or fix the read-out")
         head.load_state_dict(ck["state_dict"])
         opt.load_state_dict(ck["opt"])
         it0 = int(ck.get("it", 0))
-        best_f1 = float(ck.get("val", {}).get("f1", -1.0))
         for g in opt.param_groups:
             g["lr"] = RESUME_LR
-        print(f"[sn] resuming {S.CKPT} @ it {it0} (val F1 {best_f1:.3f}) | "
-              f"+{ITERS} iters at peak LR {RESUME_LR:g}")
+        # the bar a new checkpoint has to clear is the best score SO FAR, which
+        # is not necessarily the score of the state we are resuming from
+        best_f1 = float(ck.get("val", {}).get("f1", -1.0))
+        if src != S.CKPT and S.CKPT.exists():
+            best_f1 = max(best_f1, float(
+                torch.load(S.CKPT, map_location="cpu", weights_only=False)
+                .get("val", {}).get("f1", -1.0)))
+        print(f"[sn] resuming {src.name} @ it {it0} (best val F1 so far "
+              f"{best_f1:.3f}) | +{ITERS} iters at peak LR {RESUME_LR:g}")
     elif RESUME:
         print(f"[sn] no checkpoint at {S.CKPT} — training from scratch")
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=ITERS)

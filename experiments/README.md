@@ -661,17 +661,40 @@ you see that, read the `[sn] gpu ...` high-water line, not the traceback.
 ```bash
 ./run_experiments.sh stem_test      # CPU self-check, seconds, no GPU
 ./run_experiments.sh stemnet        # test, train, val, patch
-./run_experiments.sh stem_long      # the real run: 40k iters, ~2 h
+./run_experiments.sh stem_near      # settle SN_NEAR_R first, ~55 min
+./run_experiments.sh stem_long      # 40k iters, ~2 h
+./run_experiments.sh stem_full      # the overnight run: 150k iters, ~8 h
 ./run_experiments.sh stem_infer     # the held-out score, on its own
 ```
+
+`SN_TAG` names a run, so `stemnet<TAG>.pth` and `results/stemnet<TAG>_*` do not
+collide — which is what makes a comparison like `stem_near` possible at all.
 
 **How long is long enough.** `SN_ITERS` defaults to 4,000, which is ~1.3
 passes over the 3,028 train window centres and about 13 minutes on a 5090 at
 190 ms per window — a smoke test, not a trained model. A run that ends with the
 cosine schedule at 4e-6 while the classification loss is still falling has
 converged its *schedule*, not its head. `stem_long` is 40,000 iterations
-(~13 passes, ~2 h) with the eval wide enough to choose a checkpoint on, and
-starts cold, because a 13-minute head is not worth warm-starting from.
+(~2 h) with the eval wide enough to choose a checkpoint on, and starts cold,
+because a 13-minute head is not worth warm-starting from. `stem_full` is
+150,000 (~8 h), the overnight run.
+
+**Window sampling.** A training window is an anchor base plus a jitter of up to
+`SN_JITTER` (default `SN_WIN/3`), and **the jitter is redrawn every
+iteration**. It used to be drawn once before the loop, which pinned a run to
+one fixed set of 3,028 crops, so a longer run bought more passes over the same
+windows rather than more ground — at 13 passes tolerable, at 50 it is
+memorisation. The anchor pool is filtered on the **worst** jitter an anchor can
+draw rather than on the anchor itself, so no training crop can reach across the
+leakage margin into the val block however the dice fall; a crop that did would
+invalidate every score the run produced, silently.
+
+An interrupted run resumes from `stemnet_last.pth`, the training state, not
+from `stemnet.pth`, the best-scoring one (`SN_RESUME_FROM=best` to override).
+Resuming from `best` rewinds the optimiser to whichever earlier iteration
+happened to score well and re-covers ground already walked, which on an
+overnight run is hours thrown away — and the score it rewinds to may itself be
+an eval fluke.
 
 Beware the training-time eval: it is what **best-F1 checkpointing selects on**,
 so it has to be wide. At the old `SN_EVAL_WIN=12` it covered 85 val bases in
@@ -701,7 +724,8 @@ encoded but not predicted on, so inner squares tile exactly and no point votes
 twice), `SN_BAND_LO/HI` (0.3/4.0 m), `SN_NEAR_R` (1.0 m), `SN_VOXEL`
 (0.05 m), `SN_PTS` (160k per crop, a memory bound — see below), `SN_P` (0.5, a point votes above
 this), `SN_VOTE_CELL/SEP/R/MIN` (0.1 / 0.6 / 0.3 / 6.0), `SN_DETREND` (1),
-`SN_ITERS` (4000, a smoke test — see above),
+`SN_JITTER` (`SN_WIN/3`, redrawn per iteration), `SN_TAG` (names a run),
+`SN_RESUME_FROM` (`last`), `SN_ITERS` (4000, a smoke test — see above),
 `SN_LR`, `SN_W_OFF`, `SN_EVAL` (250), `SN_EVAL_WIN` (48 windows, which is what
 best-F1 checkpointing is selected on).
 

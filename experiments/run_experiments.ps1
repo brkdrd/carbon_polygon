@@ -161,6 +161,25 @@ function StemTrain { BwPrep; Log "StemNet - train the dense stem head"
 function StemLong  { BwPrep; Log "StemNet - the long run (~2 h)"
     Invoke-Stage "stemnet_train" @("SN_ITERS=40000", "SN_EVAL=1000",
                                    "SN_EVAL_WIN=64", "SN_RESUME=0") }
+# The overnight run. 150k iterations at ~190 ms/window is ~8 h; with the
+# jitter redrawn per iteration these are 150k distinct crops, not 50 passes
+# over a fixed 3,028.
+function StemFull  { BwPrep; Log "StemNet - the full run (~8 h)"
+    Invoke-Stage "stemnet_train" @("SN_ITERS=150000", "SN_EVAL=2500",
+                                   "SN_EVAL_WIN=64", "SN_RESUME=0") }
+# Settle SN_NEAR_R before spending 8 h on it. At 1.0 m a third of all band
+# points are labelled stem, so the head learns "near a tree" rather than
+# "trunk"; 0.5 m is far more specific but leaves fewer voters. Two tagged
+# short runs, identical seed, one variable. ~55 min for both.
+function StemNear  { BwPrep
+    Log "StemNet - SN_NEAR_R=1.0 (tag _r10)"
+    Invoke-Stage "stemnet_train" @("SN_ITERS=8000", "SN_EVAL=1000",
+                                   "SN_NEAR_R=1.0", "SN_TAG=_r10",
+                                   "SN_RESUME=0")
+    Log "StemNet - SN_NEAR_R=0.5 (tag _r05)"
+    Invoke-Stage "stemnet_train" @("SN_ITERS=8000", "SN_EVAL=1000",
+                                   "SN_NEAR_R=0.5", "SN_TAG=_r05",
+                                   "SN_RESUME=0") }
 function StemInfer { Log "StemNet - inference on the held-out val block"
     Invoke-Stage "stemnet_infer" }
 function StemPatch { Log "StemNet - inference on the attributed patch"
@@ -214,6 +233,8 @@ switch ($Target) {
     "stem_test" { StemBuild; StemTest }
     "stem_train" { StemBuild; StemTrain }
     "stem_long" { StemBuild; StemLong }
+    "stem_full" { StemBuild; StemFull }
+    "stem_near" { StemBuild; StemNear }
     "stem_infer" { StemBuild; StemInfer }
     "stem_patch" { StemBuild; StemPatch }
     "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
@@ -221,7 +242,7 @@ switch ($Target) {
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_infer|stem_patch]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch]"
         exit 2
     }
 }
