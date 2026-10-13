@@ -664,6 +664,7 @@ you see that, read the `[sn] gpu ...` high-water line, not the traceback.
 ./run_experiments.sh stem_near      # settle SN_NEAR_R first, ~55 min
 ./run_experiments.sh stem_long      # 40k iters, ~2 h
 ./run_experiments.sh stem_full      # the overnight run: 150k iters, ~8 h
+./run_experiments.sh stem_eval      # both scores: val, then the patch answer sheet
 ./run_experiments.sh stem_infer     # the held-out score, on its own
 ```
 
@@ -712,6 +713,7 @@ val block, never the training eval.
 | `results/stemnet_val_detections.csv` | `x,y,z,score,n_votes` |
 | `results/stemnet_patch_trees.csv` | same columns as `geowalker_patch_trees.csv`, so the walker and the head diff line for line |
 | `results/30_stemnet_val.png` | detections, and the vote cloud beside them |
+| `results/30_stemnet_patch.png` | the same, plus a third panel: every surveyed tree hit or missed, marker area proportional to basal area |
 
 Training windows are centred on train bases and never allowed to reach across
 the leakage margin into the val block; validation during training is the **full

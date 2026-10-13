@@ -88,8 +88,17 @@ def run_region(enc, head, band, centres):
             n_enc, time.time() - t0)
 
 
-def figure(xy, p, off, det, gt, out, title):
-    fig, ax = plt.subplots(1, 2, figsize=(17, 8))
+def figure(xy, p, off, det, gt, out, title, found=None, dbh=None):
+    """Two panels, or three on the patch.
+
+    The third panel is the point of the patch run: every surveyed tree drawn
+    hit or missed, with marker AREA proportional to basal area. A recall
+    plateau looks completely different depending on which trees it is made of
+    — all-small-stems is an argument about what counts as a tree, scattered
+    big stems is a defect — and the DBH table says which while this says where.
+    """
+    n = 3 if found is not None else 2
+    fig, ax = plt.subplots(1, n, figsize=(8.5 * n, 8))
     k = p >= S.P_THRESH
     ax[0].scatter(xy[~k, 0], xy[~k, 1], s=0.3, c="0.85", lw=0,
                   label=f"band, p<{S.P_THRESH}")
@@ -109,6 +118,27 @@ def figure(xy, p, off, det, gt, out, title):
         ax[1].scatter(gt[:, 0], gt[:, 1], s=44, facecolors="none",
                       edgecolors="tab:blue", lw=1.0, label="RTK base")
     ax[1].set_title("votes: every stem point shifted onto the base it chose")
+
+    if found is not None and len(gt):
+        f = np.asarray(found, bool)
+        # area proportional to basal area, floored so an unmeasured or hairline
+        # stem is still visible rather than invisibly small
+        d = np.asarray(dbh, float) if dbh is not None else np.full(len(gt), np.nan)
+        area = np.where(np.isfinite(d), 14.0 + 2.2 * d, 14.0)
+        for sel, c, lab in ((f, "tab:green", f"found ({int(f.sum())})"),
+                            (~f, "tab:red", f"MISSED ({int((~f).sum())})")):
+            if sel.any():
+                ax[2].scatter(gt[sel, 0], gt[sel, 1], s=area[sel], c=c,
+                              alpha=0.75, lw=0.4, edgecolors="0.25", label=lab)
+        ok = np.isfinite(d)
+        sub = ok & (d < 10.0)
+        extra = ""
+        if sub.any() and (ok & ~sub).any():
+            extra = (f" | <10 cm {f[sub].mean():.0%} of {int(sub.sum())}"
+                     f", >=10 cm {f[ok & ~sub].mean():.0%} of "
+                     f"{int((ok & ~sub).sum())}")
+        ax[2].set_title(f"which trees were found (area ~ basal area)"
+                        f"\nrecall {f.mean():.1%}{extra}")
     for a in ax:
         a.set_aspect("equal")
         a.legend(loc="upper right", fontsize=8, markerscale=3)
@@ -166,7 +196,7 @@ def per_tree(gt, det, mass, nv, attrs, tag, radius=0.5):
                 recall_ge10cm=float(found[known & (dbh >= 10)].mean())
                 if (known & (dbh >= 10)).any() else None,
                 recall_basal_area=float((ba * found).sum() / ba.sum())
-                if ba.sum() > 0 else None)
+                if ba.sum() > 0 else None), found, dbh
 
 
 def main():
@@ -290,12 +320,15 @@ def main():
                np.column_stack([det, dem.height(torch.from_numpy(
                    det.astype(np.float32)).to(dev)).cpu().numpy(), mass, nv]),
                delimiter=",", header="x,y,z,score,n_votes", comments="")
+    found = dbh = None
     if REGION == "patch":
-        out["per_tree"] = per_tree(gt, det, mass, nv, attrs, tag)
+        out["per_tree"], found, dbh = per_tree(gt, det, mass, nv, attrs, tag)
+    # 30_: the 00s are prep, 10s BaseWalker, 20s GeoWalker (23_ is already
+    # geowalker_diagnostics). StemNet owns the 30s.
     figure(xy, p, off, det, gt[:, :2],
-           C.RESULTS / f"23_stemnet{tag}.png",
+           C.RESULTS / f"30_stemnet{tag}.png",
            f"dense stem head — {REGION}: {len(det)} detections, "
-           f"{len(gt)} RTK bases")
+           f"{len(gt)} RTK bases", found=found, dbh=dbh)
     (C.RESULTS / f"stemnet{tag}_metrics.json").write_text(
         json.dumps(out, indent=2))
     print(f"\n[sn] {area_ha:.2f} ha in {secs/60:.1f} min = "

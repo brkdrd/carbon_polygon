@@ -404,6 +404,38 @@ def test_window_jitter_is_fresh_every_call_and_never_leaks_into_val():
     assert (pool[:, 0] + jit < lim).all()
 
 
+def test_patch_figure_draws_hits_misses_and_survives_the_edges():
+    """The patch figure is the visual half of the DBH table, so it must render
+    on the cases a real run actually produces: nothing detected, nothing found,
+    everything found, and stems whose girth the survey never measured."""
+    import os
+    import tempfile
+    os.environ.setdefault("DATA_DIR", tempfile.mkdtemp())
+    os.environ.setdefault("RESULTS_DIR", tempfile.mkdtemp())
+    import infer as I
+    rng = np.random.default_rng(0)
+    xy = rng.uniform(0, 40, (800, 2))
+    p_ = rng.uniform(0, 1, 800)
+    off = rng.normal(0, 0.3, (800, 2))
+    det = rng.uniform(0, 40, (20, 2))
+    gt = rng.uniform(0, 40, (40, 2))
+    dbh = np.where(rng.random(40) < 0.2, np.nan, rng.uniform(3, 45, 40))
+    d = Path(tempfile.mkdtemp())
+
+    cases = [
+        ("val.png", dict()),                                  # 2 panels
+        ("patch.png", dict(found=rng.random(40) < 0.45, dbh=dbh)),
+        ("none.png", dict(found=np.zeros(40, bool), dbh=dbh)),
+        ("all.png", dict(found=np.ones(40, bool), dbh=np.full(40, np.nan))),
+    ]
+    for name, kw in cases:
+        I.figure(xy, p_, off, det, gt, d / name, name, **kw)
+        assert (d / name).stat().st_size > 1000, name
+    # no detections and no GT at all must not raise either
+    I.figure(xy, p_, off, det[:0], gt[:0], d / "empty.png", "empty")
+    assert (d / "empty.png").exists()
+
+
 def test_oom_retry_halves_the_crop_but_never_hides_a_real_bug():
     """What a 4,000-iteration run is allowed to survive, and what it is not.
 
