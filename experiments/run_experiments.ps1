@@ -180,6 +180,11 @@ function StemNear  { BwPrep
     Invoke-Stage "stemnet_train" @("SN_ITERS=8000", "SN_EVAL=1000",
                                    "SN_NEAR_R=0.5", "SN_TAG=_r05",
                                    "SN_RESUME=0") }
+# Both scores in one go: the honest val number, then the per-tree answer sheet
+# with recall by DBH band. The second is a ceiling (training labels) but the
+# SIZE BREAKDOWN is the diagnostic - it says whether a recall plateau is the
+# model or the target definition.
+function StemEval  { StemInfer; StemPatch }
 function StemInfer { Log "StemNet - inference on the held-out val block"
     Invoke-Stage "stemnet_infer" }
 function StemPatch { Log "StemNet - inference on the attributed patch"
@@ -237,12 +242,13 @@ switch ($Target) {
     "stem_near" { StemBuild; StemNear }
     "stem_infer" { StemBuild; StemInfer }
     "stem_patch" { StemBuild; StemPatch }
+    "stem_eval" { StemBuild; StemEval }
     "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval]"
         exit 2
     }
 }

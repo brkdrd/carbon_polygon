@@ -130,6 +130,11 @@ stem_near()  { bw_prep
                log "StemNet — SN_NEAR_R=0.5 (tag _r05)"
                $RUN -e SN_ITERS=8000 -e SN_EVAL=1000 -e SN_NEAR_R=0.5 \
                     -e SN_TAG=_r05 -e SN_RESUME=0 stemnet_train; }
+# Both scores in one go: the honest val number, then the per-tree answer sheet
+# with recall by DBH band. The second is a ceiling (training labels) but the
+# SIZE BREAKDOWN is the diagnostic — it says whether a recall plateau is the
+# model or the target definition.
+stem_eval()  { stem_infer; stem_patch; }
 stem_infer() { log "StemNet — inference on the held-out val block"
                $RUN stemnet_infer; }
 stem_patch() { log "StemNet — inference on the attributed patch"
@@ -186,11 +191,12 @@ case "${1:-all}" in
   stem_near) stem_build; stem_near ;;
   stem_infer) stem_build; stem_infer ;;
   stem_patch) stem_build; stem_patch ;;
+  stem_eval) stem_build; stem_eval ;;
   stemnet) stem_build; stem_test; stem_train; stem_infer; stem_patch ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
 gw_diag|\
 gw_height|gw_head|\
-stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch]"; exit 2 ;;
+stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval]"; exit 2 ;;
 esac
