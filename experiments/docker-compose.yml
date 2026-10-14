@@ -259,7 +259,7 @@ services:
   v2_test:
     image: carbonpoly/stemnet_v2
     environment: { DATA_DIR: /tmp/data, RESULTS_DIR: /tmp/results }
-    command: ["sh", "-c", "python /app/tests/test_stemnet_v2_measure.py && python /app/tests/test_stemnet_v2_grid.py && python /app/tests/test_stemnet_v2_features.py && python /app/tests/test_stemnet_v2_circles.py"]
+    command: ["sh", "-c", "python /app/tests/test_stemnet_v2_measure.py && python /app/tests/test_stemnet_v2_grid.py && python /app/tests/test_stemnet_v2_features.py && python /app/tests/test_stemnet_v2_circles.py && python /app/tests/test_stemnet_v2_splits.py"]
 
   # Prep part 1: the raw scan on Sonata's 0.02 m grid, one real point per voxel,
   # colour kept, coordinates in the shared frame. CPU only. Scratch space up to
@@ -288,6 +288,15 @@ services:
     environment: { DATA_DIR: /data, RESULTS_DIR: /results }
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/prep_circles.py"]
+
+  # Prep part 4: train / val / test / buffer raster, occupancy, one split label
+  # per survey row. CPU only, minutes.
+  v2_splits:
+    image: carbonpoly/stemnet_v2
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/prep_splits.py"]
 
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:

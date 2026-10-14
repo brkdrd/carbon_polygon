@@ -202,6 +202,8 @@ function V2Features { Log "StemNet v2 - prep part 2: 12 covariance features, 20 
     Invoke-Stage "v2_features" }
 function V2Circles { Log "StemNet v2 - prep part 3: circle fit, derived stem bases (CPU)"
     Invoke-Stage "v2_circles" }
+function V2Splits  { Log "StemNet v2 - prep part 4: train/val/test regions (CPU)"
+    Invoke-Stage "v2_splits" }
 function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function GwHeight { Log "GeoWalker - canopy height vs the label criterion"; Invoke-Stage "geowalker_height" }
 function GwHead  { Log "GeoWalker - can the tree/not-tree head be trained?"; Invoke-Stage "geowalker_head" }
@@ -261,12 +263,14 @@ switch ($Target) {
     "v2_grid" { V2Build; V2Test; V2Grid }
     "v2_features" { V2Build; V2Test; V2Features }
     "v2_circles" { V2Build; V2Test; V2Circles }
+    "v2_splits" { V2Build; V2Test; V2Splits }
+    "v2_prep" { V2Build; V2Test; V2Grid; V2Features; V2Circles; V2Splits }
     "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_circles]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_circles|v2_splits|v2_prep]"
         exit 2
     }
 }
