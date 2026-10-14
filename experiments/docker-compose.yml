@@ -244,6 +244,23 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet/infer.py"]
 
+  # ---- StemNet v2: rebuilt from scratch (own image, own data dir) ---------
+  # Step 0: measure the raw scan and the stem map. CPU only. Writes a tile
+  # cache of ~12 bytes per raw point to data/stemnet_v2/cache.
+  v2_measure:
+    build: { context: ., dockerfile: stemnet_v2/Dockerfile }
+    image: carbonpoly/stemnet_v2
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/measure.py"]
+
+  # synthetic scan with known answers; seconds, no data
+  v2_test:
+    image: carbonpoly/stemnet_v2
+    environment: { DATA_DIR: /tmp/data, RESULTS_DIR: /tmp/results }
+    command: ["python", "/app/tests/test_stemnet_v2_measure.py"]
+
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:
     image: carbonpoly/prep

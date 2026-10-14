@@ -189,6 +189,13 @@ function StemInfer { Log "StemNet - inference on the held-out val block"
     Invoke-Stage "stemnet_infer" }
 function StemPatch { Log "StemNet - inference on the attributed patch"
     Invoke-Stage "stemnet_infer" @("SN_REGION=patch") }
+# ---- StemNet v2: rebuilt from scratch ------------------------------------
+function V2Build   { Log "Building stemnet_v2 image"
+    Invoke-Docker ($Compose + @("build", "v2_measure")) }
+function V2Test    { Log "StemNet v2 - synthetic scan, known answers (CPU)"
+    Invoke-Stage "v2_test" }
+function V2Measure { Log "StemNet v2 - measure the raw scan and the stem map (CPU)"
+    Invoke-Stage "v2_measure" }
 function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function GwHeight { Log "GeoWalker - canopy height vs the label criterion"; Invoke-Stage "geowalker_height" }
 function GwHead  { Log "GeoWalker - can the tree/not-tree head be trained?"; Invoke-Stage "geowalker_head" }
@@ -243,12 +250,14 @@ switch ($Target) {
     "stem_infer" { StemBuild; StemInfer }
     "stem_patch" { StemBuild; StemPatch }
     "stem_eval" { StemBuild; StemEval }
+    "v2_test" { V2Build; V2Test }
+    "v2_measure" { V2Build; V2Test; V2Measure }
     "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure]"
         exit 2
     }
 }
