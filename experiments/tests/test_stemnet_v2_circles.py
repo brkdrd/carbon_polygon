@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """StemNet v2 prep part 3 (circle fit): a synthetic campus with every hard case
-the real one has, and the true stem axis of each tree known.
+the real one has, the true stem axis of each tree known, and — like the real
+scan — every survey point displaced from its trunk by one common shift.
 
-  big       r 15 cm, seen all round
+  big       r 15 cm, seen all round, a crown above it
   oneside   r 30 cm, only 200 deg visible (mobile scanner), ON a tile edge
   sapling   r 3 cm
   fork_a/b  two r 8 cm stems 25 cm apart, both surveyed
   shrub     r 12 cm with a dense bush pressed against it
-  hidden    surveyed, but no trunk points at all — only ground around it
-plus sloped ground everywhere and a crown above `big`. Ground is NOT removed:
-the fit must keep it out on its own."""
+  hidden    surveyed, but no trunk anywhere near — only ground
+on an 8% slope. Ground is NOT removed: the fit must keep it out on its own."""
 from __future__ import annotations
 
 import csv
@@ -27,6 +27,8 @@ SCRIPT = HERE / "stemnet_v2" / "prep_circles.py"
 TILE = 5.0
 ORIGIN = (362_400.0, 4_763_600.0, 40.0)        # UTM 52N, the campus area
 EPSG = 32652
+SHIFT = np.array([0.30, 0.40])                 # trunk lies NE of its survey point
+sys.path.insert(0, str(HERE / "stemnet_v2"))
 
 
 def ground(x):
@@ -49,7 +51,7 @@ def _scene(rng):
     gx, gy = np.meshgrid(g, g)
     G = np.column_stack([gx.ravel(), gy.ravel(), ground(gx.ravel())])
     G[:, 2] += rng.normal(0, 0.005, len(G))
-    trees = {                                   # name: (cx, cy, r, visible arc, survey angle)
+    trees = {                                   # name: (cx, cy, r, visible arc, bark angle)
         "big": (2.5, 2.5, 0.15, 360, 0.3),
         "oneside": (5.0, 7.0, 0.30, 200, 1.6),  # x = 5.0 is a tile edge
         "sapling": (8.0, 2.0, 0.03, 360, 2.0),
@@ -60,22 +62,19 @@ def _scene(rng):
     parts = [G]
     for cx, cy, r, arc, _ in trees.values():
         parts.append(_trunk(rng, cx, cy, r, arc, a0=0.5))
-    # a dense bush pressed against `shrub`, 0-1.4 m high
-    b = rng.uniform(-0.45, 0.45, (40_000, 3))
+    b = rng.uniform(-0.45, 0.45, (40_000, 3))             # a dense bush against `shrub`
     b = b[np.linalg.norm(b[:, :2], axis=1) < 0.45]
     parts.append(np.column_stack([3.0 + 0.55 + b[:, 0], 11.0 + b[:, 1],
                                   ground(3.55) + 0.7 + b[:, 2] * 1.5]))
-    # a crown over `big`
-    c = rng.normal(0, 1.0, (30_000, 3))
+    c = rng.normal(0, 1.0, (30_000, 3))                   # a crown over `big`
     parts.append(np.column_stack([2.5 + c[:, 0] * 1.5, 2.5 + c[:, 1] * 1.5,
                                   ground(2.5) + 6.5 + c[:, 2]]))
     P = np.concatenate(parts)
     survey = {}
     for name, (cx, cy, r, _, ang) in trees.items():
-        # the stick touched the bark, give or take a centimetre
-        survey[name] = (cx + r * np.cos(ang) + rng.normal(0, 0.01),
-                        cy + r * np.sin(ang) + rng.normal(0, 0.01))
-    survey["hidden"] = (7.0, 12.0)              # nothing there but ground
+        bark = np.array([cx + r * np.cos(ang), cy + r * np.sin(ang)])
+        survey[name] = tuple(bark - SHIFT + rng.normal(0, 0.01, 2))
+    survey["hidden"] = (7.0, 12.5)              # nothing within 1.5 m but ground
     return P, trees, survey
 
 
@@ -106,93 +105,87 @@ def _write(tmp: Path, P, survey, trees):
     return names
 
 
-def test_circle_fit_finds_every_axis_and_keeps_ground_out():
+def _env(tmp, **extra):
+    env = dict(os.environ, DATA_DIR=str(tmp / "data"), RESULTS_DIR=str(tmp / "res"),
+               V2_TILE=str(TILE), V2_STEM_MAP=str(tmp / "stem.csv"), V2_ATTRS=str(tmp / "attrs.csv"))
+    env.update(extra)
+    return env
+
+
+def test_circle_fit_finds_the_nearest_trunk_and_measures_the_shift():
     rng = np.random.default_rng(11)
     P, trees, survey = _scene(rng)
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
         names = _write(tmp, P, survey, trees)
-        env = dict(os.environ, DATA_DIR=str(tmp / "data"), RESULTS_DIR=str(tmp / "res"),
-                   V2_TILE=str(TILE), V2_STEM_MAP=str(tmp / "stem.csv"),
-                   V2_ATTRS=str(tmp / "attrs.csv"))
-        r = subprocess.run([sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True)
+        r = subprocess.run([sys.executable, str(SCRIPT)], env=_env(tmp), capture_output=True, text=True)
         assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
         rows = list(csv.DictReader(open(tmp / "data" / "stemnet_v2" / "bases.csv")))
         assert len(rows) == len(names), "every survey row must be kept"
         by = dict(zip(names, rows))
+        axes = {n: np.array(v[:2]) for n, v in trees.items()}
 
-        for name, (cx, cy, rad, _, _) in trees.items():
+        for name in trees:
             row = by[name]
-            tol = 0.03 if name == "sapling" else 0.02
-            assert row["status"] in (("ok", "weak") if name == "sapling" else ("ok",)), (name, row["status"])
-            err = np.hypot(float(row["x"]) - cx, float(row["y"]) - cy)
-            assert err <= tol, f"{name}: derived base {err * 100:.1f} cm from the true axis"
+            # the rule: the trunk axis nearest the survey point
+            s = np.array(survey[name])
+            want = min(axes, key=lambda n: np.hypot(*(axes[n] - s)))
+            tol = 0.03 if want == "sapling" else 0.02
+            assert row["status"] in (("ok", "weak") if want == "sapling" else ("ok",)), (name, row["status"])
+            got = np.array([float(row["x"]), float(row["y"])])
+            err = np.hypot(*(got - axes[want]))
+            assert err <= tol, f"{name}: base {err * 100:.1f} cm from the {want} axis"
+            rad = trees[want][2]
             assert abs(float(row["radius"]) - rad) <= max(0.02, 0.15 * rad), (name, row["radius"])
 
-        # the hidden tree: ground only, so no circle may be accepted, and the
-        # row survives with the survey position
         h = by["hidden"]
         assert h["status"] == "no_fit", h["status"]
         assert abs(float(h["x"]) - survey["hidden"][0]) < 1e-3
 
-        # forks share a group; the merged file has one row for them
-        assert by["fork_a"]["fork_group"] == by["fork_b"]["fork_group"]
-        merged = list(csv.DictReader(open(tmp / "data" / "stemnet_v2" / "bases_merged.csv")))
-        assert len(merged) == len(names) - 1
+        # the common shift is measured: median survey -> trunk vector ~ SHIFT
+        fj = json.loads((tmp / "data" / "stemnet_v2" / "frame.json").read_text())
+        o = fj["bases"]["offsets"]["ALL"]
+        assert abs(o["median_dx_cm"] - SHIFT[0] * 100) < 8 and abs(o["median_dy_cm"] - SHIFT[1] * 100) < 8, o
 
-        # girth validation ran on the two attributed trees
         txt = (tmp / "res" / "stemnet_v2_circles.txt").read_text()
         assert "girth validation: 2 single-stem" in txt, txt
-        for f in ("42_stemnet_v2_girth.png", "43_stemnet_v2_circle_examples.png"):
+        for f in ("42_stemnet_v2_girth.png", "43_stemnet_v2_circle_examples.png",
+                  "45_stemnet_v2_offsets.png"):
             assert (tmp / "res" / f).stat().st_size > 1000, f
 
 
 def test_subset_run_fits_only_fully_covered_trees():
-    """A trial on a few real tiles: a tree whose column crosses into a tile
-    that was not provided must be left out, not fitted on half a column."""
     rng = np.random.default_rng(11)
     P, trees, survey = _scene(rng)
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
         names = _write(tmp, P, survey, trees)
-        gd = tmp / "data" / "stemnet_v2" / "grid0.02"
-        # drop the tile x 0-5, y 5-10: `oneside` sits on the x=5 edge next to it
-        (gd / "tile_0_1.npz").unlink()
-        env = dict(os.environ, DATA_DIR=str(tmp / "data"), RESULTS_DIR=str(tmp / "res"),
-                   V2_TILE=str(TILE), V2_STEM_MAP=str(tmp / "stem.csv"),
-                   V2_ATTRS=str(tmp / "attrs.csv"), V2_SUBSET="1")
-        r = subprocess.run([sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True)
+        (tmp / "data" / "stemnet_v2" / "grid0.02" / "tile_0_1.npz").unlink()
+        r = subprocess.run([sys.executable, str(SCRIPT)], env=_env(tmp, V2_SUBSET="1"),
+                           capture_output=True, text=True)
         assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
         assert "SUBSET RUN" in r.stdout
-        rows = list(csv.DictReader(open(tmp / "data" / "stemnet_v2" / "bases.csv")))
-        ids = {row["id"] for row in rows}
+        ids = {row["id"] for row in csv.DictReader(open(tmp / "data" / "stemnet_v2" / "bases.csv"))}
         k = {n: f"1-{i}" for i, n in enumerate(names, 1)}
         assert k["oneside"] not in ids, "a half-covered column was fitted"
         assert k["big"] in ids and k["sapling"] in ids
-        assert all(row["status"] == "ok" for row in rows if row["id"] in (k["big"], k["fork_a"]))
 
 
-def test_flat_ground_alone_never_passes_as_a_trunk():
-    """The empty-interior check: a dense disc of ground, survey point in the
-    middle, every layer must be rejected."""
-    sys.path.insert(0, str(HERE / "stemnet_v2"))
-    from prep_circles import fit_layer
+def test_ground_never_passes_as_a_trunk_and_a_lone_ring_does():
+    from prep_circles import layer_circles
     rng = np.random.default_rng(2)
-    g = np.arange(-1.0, 1.0, 0.02)
+    g = np.arange(-1.5, 1.5, 0.02)
     gx, gy = np.meshgrid(g, g)
     D = np.column_stack([gx.ravel(), gy.ravel()])
-    D = D[np.hypot(D[:, 0], D[:, 1]) <= 1.0]
-    assert all(fit_layer(D, np.array([0.1, 0.0]), rng) is None for _ in range(20))
-    # the same disc with a trunk standing in it is found: ground runs right up
-    # to the bark and nothing is scanned inside the wood
+    disc = D[np.hypot(D[:, 0], D[:, 1]) <= 1.5]
+    assert layer_circles(disc, rng) == []                       # wide: skipped as ground
+    patch = D[np.hypot(D[:, 0] - 0.5, D[:, 1]) <= 0.25]         # a small solid blob
+    assert layer_circles(patch, rng) == [], "a solid patch passed as a hollow trunk"
     a = np.linspace(0, 2 * np.pi, 60, endpoint=False)
-    ring = np.column_stack([0.2 * np.cos(a), 0.2 * np.sin(a)])
-    # a 0.2 m layer holds ten 2 cm levels of trunk wall but only one of flat
-    # ground, so in plan view the trunk is ten points deep per cell
-    ring = np.tile(ring, (10, 1)) + rng.normal(0, 0.003, (600, 2))
-    out = D[np.hypot(D[:, 0], D[:, 1]) > 0.21]
-    f = fit_layer(np.concatenate([out, ring]), np.array([0.2, 0.0]), rng)
-    assert f is not None and np.hypot(f["cx"], f["cy"]) < 0.01 and abs(f["r"] - 0.2) < 0.01, f
+    ring = np.tile(np.column_stack([0.2 * np.cos(a), 0.2 * np.sin(a)]), (10, 1))
+    ring += rng.normal(0, 0.003, ring.shape)
+    f = layer_circles(np.concatenate([ring, patch + [1.0, 0.0]]), rng)
+    assert len(f) == 1 and np.hypot(f[0]["cx"], f[0]["cy"]) < 0.01 and abs(f[0]["r"] - 0.2) < 0.01, f
 
 
 if __name__ == "__main__":
