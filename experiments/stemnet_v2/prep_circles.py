@@ -91,6 +91,10 @@ INSIDE = float(os.environ.get("V2_INSIDE", "0.25"))     # max density inside / d
 SMALL_R = float(os.environ.get("V2_SMALL_R", "0.06"))   # below this there is no inside to test
 SHELL = 0.05                                            # outside band for small circles, m
 BH = (1.0, 1.6)
+# V2_SUBSET=1: only some grid tiles are present (a trial on a few real tiles).
+# Fit only the trees whose whole column lies in tiles that exist; a column cut
+# off by a missing tile would give a confident, wrong fit.
+SUBSET = os.environ.get("V2_SUBSET", "0") != "0"
 GRID_DIR = OUT / f"grid{GRID:g}"
 FRAME_JSON = OUT / "frame.json"
 
@@ -391,6 +395,17 @@ def main():
     sm = parse_stem_map(STEM_MAP)
     gt = survey_to_local(sm, frame["epsg"], frame["origin_m"])
     log(f"{len(gt):,} survey rows in {len(set(sm.block.tolist()))} blocks")
+    if SUBSET:
+        have = {tuple(int(v) for v in q.stem.split("_")[1:]) for q in GRID_DIR.glob("tile_*.npz")}
+        lo = np.floor((gt[:, :2] - COL_R) / TILE).astype(int)
+        hi = np.floor((gt[:, :2] + COL_R) / TILE).astype(int)
+        cov = np.array([all((a, b) in have for a in range(lo[i, 0], hi[i, 0] + 1)
+                            for b in range(lo[i, 1], hi[i, 1] + 1)) for i in range(len(gt))])
+        log(f"!! SUBSET RUN on {len(have)} tiles: fitting the {int(cov.sum())} trees whose "
+            f"whole column is covered; {int((~cov).sum()):,} others are not in this run")
+        k = np.flatnonzero(cov)
+        sm = type(sm)(sm.block[k], sm.n[k], sm.lat[k], sm.lon[k], sm.z[k], sm.stations)
+        gt = gt[k]
     cols = load_columns(gt[:, :2], frame)
     attrs = attributes()
 
@@ -446,7 +461,8 @@ def main():
     rad = np.array([r["radius"] for r in okr]) * 100
     val = [(r["r_bh"], r["r_girth"]) for r in okr
            if np.isfinite(r["r_bh"]) and np.isfinite(r["r_girth"]) and ";" not in r["girth_cm"]]
-    L = ["=" * 72, "StemNet v2 — derived stem bases (circle fit, layer scan)", "=" * 72,
+    L = ["=" * 72, "StemNet v2 — derived stem bases (circle fit, layer scan)"
+         + ("  [SUBSET RUN]" if SUBSET else ""), "=" * 72,
          f"survey rows     {len(rows):,}  (all kept)",
          "status          " + "  ".join(f"{k} {v:,} ({v / len(rows) * 100:.1f}%)" for k, v in st.items()),
          f"fork groups     {len(np.unique(groups)):,} after merging survey points < {MERGE_R} m apart"]

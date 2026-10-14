@@ -147,6 +147,31 @@ def test_circle_fit_finds_every_axis_and_keeps_ground_out():
             assert (tmp / "res" / f).stat().st_size > 1000, f
 
 
+def test_subset_run_fits_only_fully_covered_trees():
+    """A trial on a few real tiles: a tree whose column crosses into a tile
+    that was not provided must be left out, not fitted on half a column."""
+    rng = np.random.default_rng(11)
+    P, trees, survey = _scene(rng)
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        names = _write(tmp, P, survey, trees)
+        gd = tmp / "data" / "stemnet_v2" / "grid0.02"
+        # drop the tile x 0-5, y 5-10: `oneside` sits on the x=5 edge next to it
+        (gd / "tile_0_1.npz").unlink()
+        env = dict(os.environ, DATA_DIR=str(tmp / "data"), RESULTS_DIR=str(tmp / "res"),
+                   V2_TILE=str(TILE), V2_STEM_MAP=str(tmp / "stem.csv"),
+                   V2_ATTRS=str(tmp / "attrs.csv"), V2_SUBSET="1")
+        r = subprocess.run([sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        assert "SUBSET RUN" in r.stdout
+        rows = list(csv.DictReader(open(tmp / "data" / "stemnet_v2" / "bases.csv")))
+        ids = {row["id"] for row in rows}
+        k = {n: f"1-{i}" for i, n in enumerate(names, 1)}
+        assert k["oneside"] not in ids, "a half-covered column was fitted"
+        assert k["big"] in ids and k["sapling"] in ids
+        assert all(row["status"] == "ok" for row in rows if row["id"] in (k["big"], k["fork_a"]))
+
+
 def test_flat_ground_alone_never_passes_as_a_trunk():
     """The empty-interior check: a dense disc of ground, survey point in the
     middle, every layer must be rejected."""
