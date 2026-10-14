@@ -24,9 +24,9 @@ What the real data showed, and why this stage has three steps:
                  circle   RANSAC + refit; radius V2_R_MIN..V2_R_MAX (2-60 cm),
                           arc >= V2_ARC (90 deg), >= V2_MIN_IN (12) inliers, and
                           HOLLOW against all the layer's points
-                 trunk    circles chained over consecutive layers within
-                          V2_RUN_TOL (10 cm); >= V2_RUN (3) layers is a trunk,
-                          2 layers a weak candidate
+                 trunk    circles chained across layers within V2_RUN_TOL
+                          (10 cm), bridging up to V2_MAX_GAP (2) failed layers;
+                          >= V2_RUN (3) layers is a trunk, 2 a weak candidate
   2. REGISTER  per survey block, the horizontal shift that puts the most survey
                points ON a trunk's bark (|distance to axis - radius| small):
                a coarse search over +-V2_REG_R (2 m) at 5 cm, refined at 1 cm.
@@ -38,9 +38,13 @@ What the real data showed, and why this stage has three steps:
                chance, but their runner-up is 0.87-0.99 of the peak, while a real
                shift's runner-up stays <= 0.4 even when only a third of the
                points match. Otherwise the block keeps zero shift and is flagged.
-  3. MATCH     each registered survey point takes the trunk whose bark it lies
-               on (smallest |distance - radius|, within V2_MATCH_TOL 20 cm),
-               full trunks before weak ones.
+               Blocks too small, or with no single answer, take the shift pooled
+               over the clean blocks (on the real scan all blocks peaked at the
+               same ~1.2 m NE, and what is left after it is per-point scatter
+               uncorrelated between neighbours: one survey-wide offset).
+  3. MATCH     one-to-one, best first: each registered survey point and each
+               trunk used once, smallest |distance - radius| within
+               V2_MATCH_TOL (40 cm), full trunks before weak ones.
 
 The label is always the trunk axis from the cloud. The shift only decides
 which trunk a survey row points at; it never moves a label. Survey heights are
@@ -94,6 +98,7 @@ MIN_IN = int(os.environ.get("V2_MIN_IN", "12"))
 IN_TOL = float(os.environ.get("V2_IN_TOL", "0.02"))      # inlier band, m (~ one voxel)
 RUN = int(os.environ.get("V2_RUN", "3"))
 RUN_TOL = float(os.environ.get("V2_RUN_TOL", "0.10"))
+MAX_GAP = int(os.environ.get("V2_MAX_GAP", "2"))       # failed layers a trunk may bridge
 ITERS = int(os.environ.get("V2_RANSAC", "200"))
 INSIDE = float(os.environ.get("V2_INSIDE", "0.25"))     # max density inside / density on the ring
 SMALL_R = float(os.environ.get("V2_SMALL_R", "0.06"))   # below this there is no inside to test
@@ -102,7 +107,7 @@ REG_R = float(os.environ.get("V2_REG_R", "2.0"))
 REG_SHARP = float(os.environ.get("V2_REG_SHARP", "6.0"))
 REG_SECOND = float(os.environ.get("V2_REG_SECOND", "0.6"))
 REG_MIN = int(os.environ.get("V2_REG_MIN", "20"))
-MATCH_TOL = float(os.environ.get("V2_MATCH_TOL", "0.20"))
+MATCH_TOL = float(os.environ.get("V2_MATCH_TOL", "0.40"))
 MERGE_R = float(os.environ.get("V2_MERGE_R", "0.3"))
 BH = (1.0, 1.6)
 SUBSET = os.environ.get("V2_SUBSET", "0") != "0"
@@ -246,34 +251,34 @@ def layer_circles(P, rng):
 
 
 def chains(layers):
-    """Link circles in consecutive layers whose centres agree within RUN_TOL.
-    layers: list of (k, z, [circles]). Returns lists of (k, z, circle)."""
+    """Link circles across layers whose centres agree within RUN_TOL. A chain
+    may bridge up to MAX_GAP layers with no accepted circle: a single layer
+    that fails its tests (a branch stub, an occluded band) must not split one
+    trunk into two — the first real run found 729 such split pairs, typically
+    1.4 m apart vertically. layers: list of (k, z, [circles])."""
     done, open_ = [], []
-    prev_k = None
     for k, z, circs in layers:
+        alive = [ch for ch in open_ if k - ch[-1][0] <= MAX_GAP + 1]
+        done.extend(ch for ch in open_ if k - ch[-1][0] > MAX_GAP + 1)
         nxt, used = [], set()
-        if prev_k is not None and k == prev_k + 1:
-            for ch in open_:
-                m = np.median([[c["cx"], c["cy"]] for _, _, c in ch], axis=0)
-                best, bd = None, RUN_TOL
-                for j, c in enumerate(circs):
-                    if j in used:
-                        continue
-                    d = np.hypot(c["cx"] - m[0], c["cy"] - m[1])
-                    if d <= bd:
-                        best, bd = j, d
-                if best is None:
-                    done.append(ch)
-                else:
-                    used.add(best)
-                    nxt.append(ch + [(k, z, circs[best])])
-        else:
-            done.extend(open_)
+        for ch in alive:
+            m = np.median([[c["cx"], c["cy"]] for _, _, c in ch], axis=0)
+            best, bd = None, RUN_TOL
+            for j, c in enumerate(circs):
+                if j in used:
+                    continue
+                d = np.hypot(c["cx"] - m[0], c["cy"] - m[1])
+                if d <= bd:
+                    best, bd = j, d
+            if best is None:
+                nxt.append(ch)                       # carried over the gap
+            else:
+                used.add(best)
+                nxt.append(ch + [(k, z, circs[best])])
         for j, c in enumerate(circs):
             if j not in used:
                 nxt.append([(k, z, c)])
         open_ = nxt
-        prev_k = k
     return done + open_
 
 
@@ -328,13 +333,23 @@ def register(S, T, R):
     j, i = np.unravel_index(np.argmax(surf), surf.shape)
     best = np.array([g[i], g[j]])
     fine = np.arange(-0.1, 0.1 + 1e-9, 0.01)
-    fs = [(bark_score(S, kd, R, best + [a, b], 0.06), a, b) for a in fine for b in fine]
+    # the fine step scores with the same 15 cm tolerance as the coarse one:
+    # the survey scatters 10-35 cm around the shift, and a tolerance narrower
+    # than that makes the refinement chase individual points instead of the
+    # bulk (a 6 cm version landed 9 cm off on 18 cm scatter)
+    fs = [(bark_score(S, kd, R, best + [a, b], 0.15), a, b) for a in fine for b in fine]
     _, a, b = max(fs)
     shift = best + [a, b]
     med = float(np.median(surf))
-    # the best score more than 30 cm from the peak: a second, competing answer
+    # a competing answer is a SEPARATE local maximum at least 50 cm away. Not
+    # "the best score more than 30 cm away": on the real scan the peak is
+    # broad (per-point scatter of 10-35 cm), so that test read the shoulder of
+    # the one peak as a rival and rejected three blocks whose surfaces had a
+    # single clear maximum
+    from scipy import ndimage
     G = np.stack(np.meshgrid(g, g), -1)
-    far = np.hypot(G[..., 0] - best[0], G[..., 1] - best[1]) > 0.3
+    loc = (surf == ndimage.maximum_filter(surf, size=5, mode="nearest")) & (surf > 0)
+    far = loc & (np.hypot(G[..., 0] - best[0], G[..., 1] - best[1]) >= 0.5)
     second = float(surf[far].max()) if far.any() else 0.0
     dist, jj = kd.query(S + shift)
     on_bark = float((np.abs(dist - R[jj]) <= 0.08).mean())
@@ -344,10 +359,15 @@ def register(S, T, R):
 
 
 def match(S, trunks):
-    """Each point takes the trunk whose bark it lies on: smallest |distance -
-    radius| within MATCH_TOL, full trunks before 2-layer candidates."""
+    """One-to-one: every (survey point, trunk) pair whose bark is within
+    MATCH_TOL of the point, taken best-first (smallest |distance - radius|),
+    each trunk and each point used once. Full trunks are assigned before
+    2-layer candidates. One-to-one because the per-point scatter left after
+    registration (10-35 cm) is comparable to the spacing of stems in a dense
+    stand: a point allowed to take any nearby trunk would take a neighbour's."""
     from scipy.spatial import cKDTree
     out = [None] * len(S)
+    taken = set()
     for tier in (True, False):
         idx = [k for k, t in enumerate(trunks) if (t["n_layers"] >= RUN) == tier]
         if not idx:
@@ -355,19 +375,19 @@ def match(S, trunks):
         T = np.array([[trunks[k]["x"], trunks[k]["y"]] for k in idx])
         R = np.array([trunks[k]["radius"] for k in idx])
         kd = cKDTree(T)
+        cand = []
         for i, s in enumerate(S):
             if out[i] is not None:
                 continue
-            near = kd.query_ball_point(s, R_MAX + MATCH_TOL)
-            best, be = None, MATCH_TOL
-            for q in near:
+            for q in kd.query_ball_point(s, R_MAX + MATCH_TOL):
                 d = float(np.hypot(*(T[q] - s)))
                 e = abs(d - R[q])
-                if e <= be:
-                    best, be = q, e
-            if best is not None:
-                d = float(np.hypot(*(T[best] - s)))
-                out[i] = (idx[best], d - R[best], d)
+                if e <= MATCH_TOL:
+                    cand.append((e, i, q, d))
+        for e, i, q, d in sorted(cand):
+            if out[i] is None and idx[q] not in taken:
+                out[i] = (idx[q], d - R[q], d)
+                taken.add(idx[q])
     return out
 
 
@@ -614,6 +634,22 @@ def main():
         log(f"block {b}: shift ({R_['shift'][0] * 100:+.1f}, {R_['shift'][1] * 100:+.1f}) cm, "
             f"sharpness x{R_['sharpness']:.1f}, {R_['on_bark'] * 100:.0f}% on bark"
             + ("" if ok else "  -> NOT applied"))
+    # blocks too small to register, or with no single answer, take the shift
+    # pooled over the blocks that registered cleanly (n-weighted median). On
+    # the real scan every block's own peak sat at the same ~1.2 m NE and the
+    # residual left after it is uncorrelated between neighbours, so the shift
+    # is common to the whole survey, not per session
+    good = [R_ for R_ in reg.values() if R_.get("applied")]
+    if good:
+        w = np.array([R_["n"] for R_ in good], float)
+        V = np.array([R_["shift"] for R_ in good])
+        pooled = np.array([np.median(np.repeat(V[:, a], w.astype(int))) for a in (0, 1)])
+        for b, R_ in reg.items():
+            if not R_.get("applied"):
+                shift[sm.block == b] = pooled
+                R_["pooled"] = pooled
+        log(f"pooled shift ({pooled[0] * 100:+.1f}, {pooled[1] * 100:+.1f}) cm for "
+            f"{sum(1 for R_ in reg.values() if 'pooled' in R_)} block(s) that could not stand alone")
     reg_xy = gt[:, :2] + shift
 
     # ---- 3. match ---------------------------------------------------------
@@ -683,12 +719,16 @@ def main():
          "   sharp: peak score / median score over the +-2 m search; 2nd: best score >30 cm away / peak"]
     for b, R_ in reg.items():
         if "surface" not in R_:
-            L.append(f"   block {b}  n={R_['n']:5d}  not registered ({R_['why']})")
+            L.append(f"   block {b}  n={R_['n']:5d}  not registered ({R_['why']})"
+                     + (f"  -> pooled ({R_['pooled'][0] * 100:+.0f}, {R_['pooled'][1] * 100:+.0f}) cm"
+                        if "pooled" in R_ else ""))
             continue
         L.append(f"   block {b}  n={R_['n']:5d}  shift ({R_['shift'][0] * 100:+6.1f}, {R_['shift'][1] * 100:+6.1f}) cm"
                  f" = {np.hypot(*R_['shift']) * 100:5.1f} cm  on bark {R_['on_bark'] * 100:4.1f}%  "
                  f"sharp x{R_['sharpness']:4.1f}  2nd {R_['second_ratio']:.2f}"
-                 + ("" if R_["applied"] else f"  NOT APPLIED: {R_['why']}"))
+                 + ("" if R_["applied"] else f"  OWN PEAK REJECTED: {R_['why']}")
+                 + (f"  -> pooled ({R_['pooled'][0] * 100:+.0f}, {R_['pooled'][1] * 100:+.0f}) cm"
+                    if "pooled" in R_ else ""))
     L += ["", "-- 2. matching --",
           "status              " + "  ".join(f"{k} {v:,} ({v / len(rows) * 100:.1f}%)" for k, v in st.items())]
     mt = [r for r in rows if r["status"] in ("ok", "weak")]
@@ -741,12 +781,13 @@ def main():
         file="bases.csv", merged="bases_merged.csv", trunks="trunks.csv", status=st, subset=SUBSET,
         registration={str(b): dict(n=R_["n"], applied=R_["applied"],
                                    shift_m=[float(v) for v in R_["shift"]],
+                                   pooled_m=[float(v) for v in R_["pooled"]] if "pooled" in R_ else None,
                                    **({k: R_[k] for k in ("on_bark", "sharpness", "second_ratio")}
                                       if "surface" in R_ else {"why": R_["why"]}))
                       for b, R_ in reg.items()},
         params=dict(discover_r=DISCOVER_R, cell=CELL, halo=HALO, scan_h=SCAN_H, layer=LAYER, gap=GAP,
                     r_min=R_MIN, r_max=R_MAX, arc=ARC, min_in=MIN_IN, in_tol=IN_TOL, run=RUN,
-                    run_tol=RUN_TOL, inside=INSIDE, small_r=SMALL_R, ransac=ITERS, reg_r=REG_R,
+                    run_tol=RUN_TOL, max_gap=MAX_GAP, inside=INSIDE, small_r=SMALL_R, ransac=ITERS, reg_r=REG_R,
                     reg_sharp=REG_SHARP, reg_second=REG_SECOND, match_tol=MATCH_TOL,
                     merge_r=MERGE_R))
     FRAME_JSON.write_text(json.dumps(frame, indent=2))

@@ -27,7 +27,9 @@ SCRIPT = HERE / "stemnet_v2" / "prep_circles.py"
 TILE = 5.0
 ORIGIN = (362_400.0, 4_763_600.0, 40.0)
 EPSG = 32652
-SHIFT = {1: np.array([0.70, 0.90]), 2: np.array([0.0, 0.0])}
+# blocks 1 and 3 share one shift (block 3 is too small to register alone and
+# must take the pooled one); block 2 is not shifted
+SHIFT = {1: np.array([0.70, 0.90]), 2: np.array([0.0, 0.0]), 3: np.array([0.70, 0.90])}
 W = 30.0
 sys.path.insert(0, str(HERE / "stemnet_v2"))
 
@@ -58,12 +60,17 @@ def _scene(rng):
     G = np.column_stack([gx.ravel(), gy.ravel(), ground(gx.ravel())])
     P = np.concatenate([G] + [_trunk(rng, x, y, r) for (x, y), r in zip(pos, rad)])
     survey = []                                            # (block, x, y, tree index or -1)
-    for i in range(50):                                    # first 50 surveyed, interleaved blocks
-        b = 1 if i % 2 == 0 else 2
+    for i in range(50):                                    # first 50 surveyed, interleaved:
+        b = 2 if i % 5 in (1, 3) else 1                    # 30 in block 1, 20 in block 2
         ang = rng.uniform(0, 2 * np.pi)
         bark = pos[i] + rad[i] * np.array([np.cos(ang), np.sin(ang)])
         s = bark - SHIFT[b] + rng.normal(0, 0.01, 2)
         survey.append((b, s[0], s[1], i))
+    for i in range(50, 55):                                # block 3: five points only
+        ang = rng.uniform(0, 2 * np.pi)
+        bark = pos[i] + rad[i] * np.array([np.cos(ang), np.sin(ang)])
+        s = bark - SHIFT[3] + rng.normal(0, 0.01, 2)
+        survey.append((3, s[0], s[1], i))
     while True:                                            # a survey point over empty ground
         p = rng.uniform(4, W - 4, 2)
         if np.min(np.hypot(*(pos - p).T)) > 1.5:
@@ -85,7 +92,7 @@ def _write(tmp: Path, P, survey, pos, rad):
         epsg=EPSG, origin_m=list(ORIGIN), tile_m=TILE, grids={"0.02": {}})))
     inv = Transformer.from_crs(f"EPSG:{EPSG}", "EPSG:4326", always_xy=True)
     lines, attrs = [], []
-    for b in (1, 2):
+    for b in (1, 2, 3):
         lines.append(f"base_{b},43.1\t,131.8\t,100.0")
         for k, (bb, x, y, tree) in enumerate(survey):
             if bb != b:
@@ -121,6 +128,7 @@ def test_register_each_session_then_match_every_survey_point_to_its_own_trunk():
             got = np.array(reg[str(b)]["shift_m"])
             assert reg[str(b)]["applied"], reg[str(b)]
             assert np.hypot(*(got - SHIFT[b])) <= 0.03, f"block {b}: shift {got} vs {SHIFT[b]}"
+        assert not reg["3"]["applied"] and reg["3"]["pooled_m"] is not None, reg["3"]
 
         rows = list(csv.DictReader(open(tmp / "data" / "stemnet_v2" / "bases.csv")))
         assert len(rows) == len(survey), "every survey row kept"
@@ -141,7 +149,7 @@ def test_register_each_session_then_match_every_survey_point_to_its_own_trunk():
         full = [t for t in trunks if int(t["n_layers"]) >= 3]
         assert len(full) >= 66, len(full)                  # nearly all 70 trunks found
         unclaimed = sum(int(t["survey_rows"]) == 0 for t in full)
-        assert 15 <= unclaimed <= 22, unclaimed            # the 20 unsurveyed ones
+        assert 12 <= unclaimed <= 17, unclaimed            # the 15 unsurveyed ones
 
         txt = (tmp / "res" / "stemnet_v2_circles.txt").read_text()
         assert "girth:" in txt, txt
@@ -186,6 +194,45 @@ def test_registration_finds_a_shift_only_when_there_is_one():
     for seed in range(4):                      # no relation at all: never accepted
         noise = register(np.random.default_rng(seed).uniform(0, 30, (80, 2)), T, R)
         assert not accepted(noise), (noise["sharpness"], noise["second_ratio"])
+
+
+def test_registration_accepts_a_broad_peak_from_scattered_points():
+    """The real survey scatters 10-35 cm around the common shift, which makes
+    the peak broad. Its shoulder is not a rival answer."""
+    from prep_circles import register, REG_SHARP, REG_SECOND
+    # 200 points scattered by 18 cm pin the shift to a few cm, not to 1 cm: the
+    # score maximum wanders 2-9 cm with the draw. Matching tolerates 40 cm, so
+    # that precision is enough; what must never happen is rejecting the block.
+    for seed in (9, 1, 2, 3, 4):
+        rng = np.random.default_rng(seed)
+        T = rng.uniform(0, 40, (500, 2)); R = rng.uniform(0.03, 0.2, 500)
+        ang = rng.uniform(0, 2 * np.pi, 200)
+        S = (T[:200] + R[:200, None] * np.column_stack([np.cos(ang), np.sin(ang)])
+             - [0.7, 1.0] + rng.normal(0, 0.18, (200, 2)))
+        g = register(S, T, R)
+        assert np.hypot(*(g["shift"] - [0.7, 1.0])) <= 0.10, (seed, g["shift"])
+        assert g["sharpness"] >= REG_SHARP and g["second_ratio"] <= REG_SECOND, \
+            (seed, g["sharpness"], g["second_ratio"])
+
+
+def test_one_failed_layer_does_not_split_a_trunk():
+    from prep_circles import chains
+    c = dict(cx=1.0, cy=2.0, r=0.1, rms=0.005, arc=300.0)
+    layers = [(k, 0.2 * k, [] if k in (6, 7) else [dict(c)]) for k in range(15)]
+    ch = [x for x in chains(layers) if len(x) >= 2]
+    assert len(ch) == 1 and len(ch[0]) == 13, [len(x) for x in ch]
+    layers = [(k, 0.2 * k, [] if k in (5, 6, 7) else [dict(c)]) for k in range(15)]
+    assert len([x for x in chains(layers) if len(x) >= 2]) == 2      # 3 missing: two pieces
+
+
+def test_matching_is_one_to_one():
+    """Two survey points both closest to one trunk's bark: the better one gets
+    it, the other its own next trunk — never both on the same stem."""
+    from prep_circles import match
+    trunks = [dict(x=0.0, y=0.0, radius=0.1, n_layers=5), dict(x=0.5, y=0.0, radius=0.1, n_layers=5)]
+    S = np.array([[0.11, 0.0], [0.13, 0.05]])
+    m = match(S, trunks)
+    assert m[0][0] == 0 and m[1][0] == 1, m
 
 
 if __name__ == "__main__":
