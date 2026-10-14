@@ -106,6 +106,26 @@ def test_splits_hold_out_cleanly_and_keep_every_row():
         assert min(xs) > W / 2, "strip val sits at the high-x end"
 
 
+def test_splits_use_the_shift_v2_bases_recorded():
+    """The test zone is built from shifted survey points: with a 1.2 m shift
+    recorded, every split label must equal the label of the SHIFTED position."""
+    rng = np.random.default_rng(4)
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        n_att, n_all = _write(tmp, rng)
+        _, raw = _run(tmp)                                  # no v2_bases yet: raw positions
+        fp = tmp / "data" / "stemnet_v2" / "frame.json"
+        fj = json.loads(fp.read_text()); fj["bases"] = dict(shift_m=[0.68, 1.02]); fp.write_text(json.dumps(fj))
+        R, rows = _run(tmp)
+        for a, b in zip(raw, rows):                         # every position moved by the shift
+            assert abs(float(b["rtk_x"]) - float(a["rtk_x"]) - 0.68) < 1e-3, (a, b)
+            assert abs(float(b["rtk_y"]) - float(a["rtk_y"]) - 1.02) < 1e-3, (a, b)
+        split = R["split"]
+        for r in rows:
+            c = split[int(float(r["rtk_y"])), int(float(r["rtk_x"]))]
+            assert ["train", "val", "test", "buffer"][c] == r["split"], r
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

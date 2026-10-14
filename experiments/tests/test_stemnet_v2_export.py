@@ -16,12 +16,17 @@ sys.path.insert(0, str(HERE / "tests"))
 
 
 def test_export_cuts_exact_columns():
-    import test_stemnet_v2_circles as C
+    import test_stemnet_v2_bases as C
     rng = np.random.default_rng(21)
     P, pos, rad, survey = C._scene(rng)
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
-        C._write(tmp, P, survey, pos, rad)
+        C._write(tmp, P, survey)
+        rows = [l.split(",") for l in (tmp / "stem.csv").read_text().splitlines() if not l.startswith("base")]
+        (tmp / "attrs.csv").write_text(
+            "n,lat,lon,z,girth_cm,code,species,comment,name_ambiguous\n"
+            + "".join(f"{r[0]},{r[1].strip()},{r[2].strip()},50,{20 + 10 * k},1,Tilia,,0\n"
+                      for k, r in enumerate(rows[:8])))
         env = C._env(tmp, V2_EXPORT_GIRTH="5", V2_EXPORT_RANDOM="6", V2_EXPORT_R="2.0", V2_EXPORT_H="9")
         r = subprocess.run([sys.executable, str(HERE / "stemnet_v2" / "export_columns.py")],
                            env=env, capture_output=True, text=True)

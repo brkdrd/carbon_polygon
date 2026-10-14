@@ -31,7 +31,7 @@ kept; split is a label, never a filter.
 Outputs (data/stemnet_v2/):
   regions.npz    split (uint8: 0 train, 1 val, 2 test, 3 buffer), occupancy
                  (int32), x0, y0, cell — the training crop sampler reads this
-  splits.csv     one row per survey row: id, rtk x/y, split, and if part 3 has
+  splits.csv     one row per survey row: id, rtk x/y (shifted), split, and if part 3 has
                  run, the derived base, status and fork group
   results/stemnet_v2_splits.txt, 44_stemnet_v2_splits.png
 """
@@ -170,7 +170,15 @@ def main():
     RESULTS.mkdir(parents=True, exist_ok=True)
     sm = parse_stem_map(STEM_MAP)
     gt = survey_to_local(sm, frame["epsg"], frame["origin_m"])
-    xy = gt[:, :2]
+    # in the scan's frame every survey point sits at survey + the measured
+    # shift (v2_bases); the test zone and every tree's split are built there,
+    # or the test patch's edges land 1.2 m away from its own trees
+    shift = np.array(frame.get("bases", {}).get("shift_m", [0.0, 0.0]), np.float64)
+    if "bases" not in frame:
+        log("!! v2_bases has not run: using raw survey positions, which are ~1.2 m off the scan")
+    else:
+        log(f"survey positions shifted by ({shift[0]:+.2f}, {shift[1]:+.2f}) m, as v2_bases recorded")
+    xy = gt[:, :2] + shift
 
     att = []
     with open(ATTRS) as f:
