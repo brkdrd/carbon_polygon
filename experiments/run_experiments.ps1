@@ -198,6 +198,8 @@ function V2Measure { Log "StemNet v2 - measure the raw scan and the stem map (CP
     Invoke-Stage "v2_measure" }
 function V2Grid    { Log "StemNet v2 - prep part 1: Sonata grid, colour, shared frame (CPU)"
     Invoke-Stage "v2_grid" }
+function V2Features { Log "StemNet v2 - prep part 2: 12 covariance features, 20 NN (CPU)"
+    Invoke-Stage "v2_features" }
 function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function GwHeight { Log "GeoWalker - canopy height vs the label criterion"; Invoke-Stage "geowalker_height" }
 function GwHead  { Log "GeoWalker - can the tree/not-tree head be trained?"; Invoke-Stage "geowalker_head" }
@@ -255,12 +257,13 @@ switch ($Target) {
     "v2_test" { V2Build; V2Test }
     "v2_measure" { V2Build; V2Test; V2Measure }
     "v2_grid" { V2Build; V2Test; V2Grid }
+    "v2_features" { V2Build; V2Test; V2Features }
     "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features]"
         exit 2
     }
 }
