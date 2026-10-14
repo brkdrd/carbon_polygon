@@ -145,6 +145,7 @@ v2_test()    { log "StemNet v2 — synthetic scan, known answers (CPU)"; $RUN v2
 v2_measure() { log "StemNet v2 — measure the raw scan and the stem map (CPU)"; $RUN v2_measure; }
 v2_grid()    { log "StemNet v2 — prep part 1: Sonata grid, colour, shared frame (CPU)"; $RUN v2_grid; }
 v2_features() { log "StemNet v2 — prep part 2: 12 covariance features, 20 NN (CPU)"; $RUN v2_features; }
+v2_circles() { log "StemNet v2 — prep part 3: circle fit, derived stem bases (CPU)"; $RUN v2_circles; }
 gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
 gw_height() { log "GeoWalker — canopy height vs the label criterion"; $RUN geowalker_height; }
 gw_head()  { log "GeoWalker — can the tree/not-tree head be trained?"; $RUN geowalker_head; }
@@ -202,11 +203,12 @@ case "${1:-all}" in
   v2_measure) v2_build; v2_test; v2_measure ;;
   v2_grid) v2_build; v2_test; v2_grid ;;
   v2_features) v2_build; v2_test; v2_features ;;
+  v2_circles) v2_build; v2_test; v2_circles ;;
   stemnet) stem_build; stem_test; stem_train; stem_infer; stem_patch ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
 gw_diag|\
 gw_height|gw_head|\
-stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features]"; exit 2 ;;
+stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_circles]"; exit 2 ;;
 esac

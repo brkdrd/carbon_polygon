@@ -14,6 +14,7 @@ to fall off.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -74,3 +75,52 @@ class Frame:
         """Raw integers -> metres in the shared frame (origin subtracted in
         integers first, so the float carries only the small local value)."""
         return (np.asarray(P, np.int64) - self.oi).astype(np.float64) * self.s
+
+
+# ---------------------------------------------------------------------------
+# the survey
+# ---------------------------------------------------------------------------
+STEM_MAP = Path(os.environ.get("V2_STEM_MAP", "/app/poderevka.csv"))
+ATTRS = Path(os.environ.get("V2_ATTRS", "/app/poderevka_attributes.csv"))
+
+
+@dataclass
+class StemMap:
+    block: np.ndarray            # which base_N block a tree row sits under
+    n: np.ndarray                # tree number as written (restarts per block)
+    lat: np.ndarray
+    lon: np.ndarray
+    z: np.ndarray
+    stations: list = field(default_factory=list)   # (name, lat, lon, z)
+
+
+def parse_stem_map(path: Path) -> StemMap:
+    """Every tree row, in file order. `base_N` rows open a block and are RTK
+    base stations; they are kept aside, not dropped."""
+    block, n, lat, lon, z, stations = [], [], [], [], [], []
+    cur = 0
+    with open(path) as f:
+        for raw in f:
+            p = [s.strip() for s in raw.split(",")]
+            if len(p) < 4 or not p[0]:
+                continue
+            if p[0].startswith("base"):
+                cur = int(p[0].split("_")[1]) if "_" in p[0] else cur + 1
+                stations.append((p[0], float(p[1]), float(p[2]), float(p[3])))
+                continue
+            block.append(cur); n.append(p[0])
+            lat.append(float(p[1])); lon.append(float(p[2])); z.append(float(p[3]))
+    return StemMap(np.array(block), np.array(n), np.array(lat), np.array(lon),
+                   np.array(z), stations)
+
+
+
+
+def survey_to_local(sm: "StemMap", epsg: int, origin_m):
+    """Survey rows -> the shared frame: project to the cloud's CRS, subtract
+    the same origin the cloud had subtracted, on all three axes."""
+    from pyproj import Transformer
+    tr = Transformer.from_crs("EPSG:4326", f"EPSG:{int(epsg)}", always_xy=True)
+    x, y = tr.transform(sm.lon, sm.lat)
+    o = np.asarray(origin_m, np.float64)
+    return np.column_stack([np.asarray(x) - o[0], np.asarray(y) - o[1], sm.z - o[2]])

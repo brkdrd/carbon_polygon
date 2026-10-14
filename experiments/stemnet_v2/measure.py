@@ -87,34 +87,8 @@ def find_laz() -> Path:
     return hits[0]
 
 
-@dataclass
-class StemMap:
-    block: np.ndarray            # which base_N block a tree row sits under
-    n: np.ndarray                # tree number as written (restarts per block)
-    lat: np.ndarray
-    lon: np.ndarray
-    z: np.ndarray
-    stations: list = field(default_factory=list)   # (name, lat, lon, z)
-
-
-def parse_stem_map(path: Path) -> StemMap:
-    """Every tree row, in file order. `base_N` rows open a block and are RTK
-    base stations; they are kept aside, not dropped."""
-    block, n, lat, lon, z, stations = [], [], [], [], [], []
-    cur = 0
-    with open(path) as f:
-        for raw in f:
-            p = [s.strip() for s in raw.split(",")]
-            if len(p) < 4 or not p[0]:
-                continue
-            if p[0].startswith("base"):
-                cur = int(p[0].split("_")[1]) if "_" in p[0] else cur + 1
-                stations.append((p[0], float(p[1]), float(p[2]), float(p[3])))
-                continue
-            block.append(cur); n.append(p[0])
-            lat.append(float(p[1])); lon.append(float(p[2])); z.append(float(p[3]))
-    return StemMap(np.array(block), np.array(n), np.array(lat), np.array(lon),
-                   np.array(z), stations)
+# the stem-map parser lives in core.py, shared with the circle fit
+from core import StemMap, parse_stem_map  # noqa: E402,F401
 
 
 def girth_rows(path: Path) -> dict:
