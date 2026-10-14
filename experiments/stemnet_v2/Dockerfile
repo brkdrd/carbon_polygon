@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir numpy scipy matplotlib "laspy[lazrs]" pyproj
 COPY basewalker/poderevka.csv /app/poderevka.csv
 COPY basewalker/poderevka_attributes.csv /app/poderevka_attributes.csv
 COPY stemnet_v2 /app/stemnet_v2
-COPY tests/test_stemnet_v2_measure.py /app/tests/test_stemnet_v2_measure.py
+COPY tests/test_stemnet_v2_measure.py tests/test_stemnet_v2_grid.py /app/tests/
 
 WORKDIR /app
 CMD ["python", "/app/stemnet_v2/measure.py"]

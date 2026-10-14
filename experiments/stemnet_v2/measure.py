@@ -44,6 +44,8 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 # ---------------------------------------------------------------------------
 # configuration
 # ---------------------------------------------------------------------------
@@ -130,38 +132,8 @@ def girth_rows(path: Path) -> dict:
     return out
 
 
-# ---------------------------------------------------------------------------
-# the integer frame: every cell / voxel / tile index is computed from the
-# file's own integers, so tiles partition voxels exactly
-# ---------------------------------------------------------------------------
-class Frame:
-    def __init__(self, scales, offsets, mins):
-        self.s = np.asarray(scales, np.float64)
-        self.o = np.asarray(offsets, np.float64)
-        mins = np.asarray(mins, np.float64)
-        org = np.array([np.floor(mins[0] / TILE) * TILE,
-                        np.floor(mins[1] / TILE) * TILE,
-                        np.floor(mins[2])])
-        self.oi = np.round((org - self.o) / self.s).astype(np.int64)
-        self.origin_m = self.oi * self.s + self.o
-
-    def units(self, size, axis):
-        q = size / self.s[axis]
-        return int(round(q)), abs(q - round(q)) < 1e-6
-
-    def index(self, I, axis, size):
-        """Cell index of raw integers I along `axis` for cells of `size` m."""
-        d = np.asarray(I, np.int64) - self.oi[axis]
-        q, exact = self.units(size, axis)
-        if exact:
-            return d // q
-        return np.floor(d * self.s[axis] / size).astype(np.int64)
-
-    def exact(self, size):
-        return all(self.units(size, a)[1] for a in range(3))
-
-    def metres(self, P):
-        return P.astype(np.float64) * self.s + self.o
+# the integer frame lives in core.py, shared with every later v2 stage
+from core import Frame  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
