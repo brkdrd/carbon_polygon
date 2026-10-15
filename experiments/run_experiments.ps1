@@ -202,7 +202,7 @@ function V2Features { Log "StemNet v2 - prep part 2: 12 covariance features, 20 
     Invoke-Stage "v2_features" }
 function V2Bases   { Log "StemNet v2 - prep part 3: bases = survey + shift, audited (CPU)"
     Invoke-Stage "v2_bases" }
-function V2Labels  { Log "StemNet v2 - prep part 5: per-point labels (CPU, hours)"
+function V2Labels  { Log "StemNet v2 - prep part 5: per-point labels (CPU)"
     Invoke-Stage "v2_labels" }
 function V2Export  { Log "StemNet v2 - export scan columns around 80 survey points (CPU)"
     Invoke-Stage "v2_export" }

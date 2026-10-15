@@ -298,9 +298,8 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/prep_splits.py"]
 
-  # Prep part 5: per-point labels — close to a tree base (gate), the offset to
-  # it, and ignore zones around trunks no survey row claims. CPU, hours: the
-  # trunk finder runs over the whole scan once.
+  # Prep part 5: per-point labels — close to a tree base (gate) and the offset
+  # to it. CPU, minutes.
   v2_labels:
     image: carbonpoly/stemnet_v2
     env_file: [.env]

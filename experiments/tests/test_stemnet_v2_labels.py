@@ -103,8 +103,9 @@ def test_labels_follow_every_rule():
         assert (g[foot] == 1).all(), name               # the ground at its foot is "close"
         away = (dg > r + 0.35) & (dg < r + 1.0) & (np.abs(X[:, 2] - ground(X[:, 0])) < 0.05)
         assert (g[away] == 0).all(), name
-    un = at("unsurveyed", 0.1, 2.3)
-    assert un.sum() > 100 and (g[un] == -1).all(), np.unique(g[un], return_counts=True)
+    un = at("unsurveyed", 0.1, 2.3)                     # no survey row: plain background
+    assert un.sum() > 100 and (g[un] == 0).all(), np.unique(g[un], return_counts=True)
+    assert set(np.unique(g).tolist()) <= {0, 1}
     fk = at("fork_a", 0.1, 2.3) | at("fork_b", 0.1, 2.3)
     assert (g[fk] == 1).all() and len(set(b[fk].tolist())) == 1   # both stems -> one merged base
 

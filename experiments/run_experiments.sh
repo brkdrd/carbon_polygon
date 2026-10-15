@@ -146,7 +146,7 @@ v2_measure() { log "StemNet v2 — measure the raw scan and the stem map (CPU)";
 v2_grid()    { log "StemNet v2 — prep part 1: Sonata grid, colour, shared frame (CPU)"; $RUN v2_grid; }
 v2_features() { log "StemNet v2 — prep part 2: 12 covariance features, 20 NN (CPU)"; $RUN v2_features; }
 v2_bases()   { log "StemNet v2 — prep part 3: bases = survey + shift, audited (CPU)"; $RUN v2_bases; }
-v2_labels()  { log "StemNet v2 — prep part 5: per-point labels (CPU, hours)"; $RUN v2_labels; }
+v2_labels()  { log "StemNet v2 — prep part 5: per-point labels (CPU)"; $RUN v2_labels; }
 v2_export()  { log "StemNet v2 — export scan columns around 80 survey points (CPU)"; $RUN v2_export; }
 v2_splits()  { log "StemNet v2 — prep part 4: train/val/test regions (CPU)"; $RUN v2_splits; }
 gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
