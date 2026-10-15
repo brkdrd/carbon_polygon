@@ -33,9 +33,10 @@ def ground(x):
     return 0.06 * x
 
 
-def _trunk(rng, cx, cy, r, h=3.0):
-    na = max(int(2 * np.pi * r / 0.02), 8)
-    a = np.linspace(0, 2 * np.pi, na, endpoint=False) + rng.uniform(0, 1)
+def _trunk(rng, cx, cy, r, h=3.0, arc=360.0, a0=None):
+    a0 = rng.uniform(0, 1) if a0 is None else a0
+    na = max(int(np.radians(arc) * r / 0.02), 8)
+    a = np.linspace(0, np.radians(arc), na, endpoint=(arc < 360)) + a0
     z = np.arange(0.0, h, 0.02)
     A, Z = np.meshgrid(a, z)
     P = np.column_stack([cx + r * np.cos(A.ravel()), cy + r * np.sin(A.ravel()), ground(cx) + Z.ravel()])
@@ -53,18 +54,25 @@ def _scene(rng):
     g = np.arange(0.02, W, 0.04)
     gx, gy = np.meshgrid(g, g)
     G = np.column_stack([gx.ravel(), gy.ravel(), ground(gx.ravel())])
-    P = np.concatenate([G] + [_trunk(rng, x, y, r) for (x, y), r in zip(pos, rad)])
+    # the last 12 trunks are seen from one side only (70 deg of bark): too
+    # little arc for a circle, so with a girth they are tier B, without one C
+    face = rng.uniform(0, 2 * np.pi, len(pos))
+    parts = [G]
+    for i, ((x, y), r) in enumerate(zip(pos, rad)):
+        parts.append(_trunk(rng, x, y, r, arc=70.0, a0=face[i] - np.radians(35)) if i >= 48
+                     else _trunk(rng, x, y, r))
+    P = np.concatenate(parts)
     survey = []
     for i in range(60):
         b = 1 + i % 3
-        ang = rng.uniform(0, 2 * np.pi)
+        ang = face[i] if i >= 48 else rng.uniform(0, 2 * np.pi)   # the stick touches visible bark
         bark = pos[i] + rad[i] * np.array([np.cos(ang), np.sin(ang)])
         s = bark - FIXED - EXTRA[b] + rng.normal(0, 0.005, 2)
         survey.append((b, s[0], s[1], i))
     return P, pos, rad, survey
 
 
-def _write(tmp: Path, P, survey):
+def _write(tmp: Path, P, survey, girth=None):
     from pyproj import Transformer
     d = tmp / "data" / "stemnet_v2" / "grid0.02"
     d.mkdir(parents=True)
@@ -76,15 +84,19 @@ def _write(tmp: Path, P, survey):
     (tmp / "data" / "stemnet_v2" / "frame.json").write_text(json.dumps(dict(
         epsg=EPSG, origin_m=list(ORIGIN), tile_m=TILE, grids={"0.02": {}})))
     inv = Transformer.from_crs(f"EPSG:{EPSG}", "EPSG:4326", always_xy=True)
-    lines = []
+    lines, arows = [], []
+    girth = girth or {}
     for b in (1, 2, 3):
         lines.append(f"base_{b},43.1\t,131.8\t,100.0")
         for k, (bb, x, y, _) in enumerate(survey):
             if bb == b:
                 lon, lat = inv.transform(ORIGIN[0] + x, ORIGIN[1] + y)
                 lines.append(f"{k + 1},{lat:.9f}\t,{lon:.9f}\t,{ORIGIN[2] + ground(x) - 0.4:.3f}")
+                if k in girth:
+                    arows.append(f"{k + 1},{lat:.9f},{lon:.9f},50,{girth[k]},1,Tilia,,0")
     (tmp / "stem.csv").write_text("\n".join(lines) + "\n")
-    (tmp / "attrs.csv").write_text("n,lat,lon,z,girth_cm,code,species,comment,name_ambiguous\n")
+    (tmp / "attrs.csv").write_text("n,lat,lon,z,girth_cm,code,species,comment,name_ambiguous\n"
+                                   + "".join(a + "\n" for a in arows))
 
 
 def _env(tmp, **extra):
@@ -105,9 +117,9 @@ def test_bases_are_shifted_survey_points_and_the_audit_catches_a_block_that_is_o
         assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
         rows = list(csv.DictReader(open(tmp / "data" / "stemnet_v2" / "bases.csv")))
         assert len(rows) == len(survey), "every survey row kept"
-        for row in rows:                                   # base = survey + fixed shift, exactly
-            assert abs(float(row["x"]) - float(row["rtk_x"]) - FIXED[0]) < 1e-3
-            assert abs(float(row["y"]) - float(row["rtk_y"]) - FIXED[1]) < 1e-3
+        for row in rows:                                   # bark point = survey + fixed shift, exactly
+            assert abs(float(row["bark_x"]) - float(row["rtk_x"]) - FIXED[0]) < 1e-3
+            assert abs(float(row["bark_y"]) - float(row["rtk_y"]) - FIXED[1]) < 1e-3
             assert row["quality"] in ("on_bark", "near", "far")
         A = json.loads((tmp / "data" / "stemnet_v2" / "frame.json").read_text())["bases"]["audit"]
         for b in ("1", "2"):
@@ -122,6 +134,50 @@ def test_bases_are_shifted_survey_points_and_the_audit_catches_a_block_that_is_o
         for b in ("1", "2"):
             assert "WARNING" not in txt.split(f"block {b}")[1].split("\n")[0]
         assert (tmp / "res" / "45_stemnet_v2_bases_audit.png").stat().st_size > 1000
+
+
+def test_tiered_bases_move_from_the_bark_to_the_axis():
+    """A: a circle touching the shifted point -> its centre. B: no circle but a
+    single-stem girth -> moved inward by the girth radius along the bark normal.
+    C: neither -> the shifted point. A circle whose radius contradicts the
+    tree's own girth is someone else's trunk and must not be used."""
+    rng = np.random.default_rng(5)
+    P, pos, rad, survey = _scene(rng)
+    girth = {k: f"{2 * np.pi * rad[t] * 100:.1f}" for k, (b, _, _, t) in enumerate(survey)
+             if b in (1, 2) and (k % 2 == 0 or t >= 48)}
+    bad = next(k for k, (b, _, _, t) in enumerate(survey) if b in (1, 2) and k % 2 == 0 and t < 48 and rad[t] >= 0.12)
+    girth[bad] = f"{2 * np.pi * rad[survey[bad][3]] * 100 * 0.25:.1f}"          # a quarter of the truth
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        _write(tmp, P, survey, girth)
+        r = subprocess.run([sys.executable, str(SCRIPT)], env=_env(tmp), capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        rows = list(csv.DictReader(open(tmp / "data" / "stemnet_v2" / "bases.csv")))
+        assert len(rows) == len(survey)
+        by = {(int(r_["block"]), int(r_["n"])): r_ for r_ in rows}
+        err = {"A": [], "B": [], "C": []}
+        bark_err = []
+        for k, (b, _, _, tr) in enumerate(survey):
+            if b == 3:
+                continue                                    # displaced block: not on bark
+            row = by[(b, k + 1)]
+            base = np.array([float(row["x"]), float(row["y"])])
+            bark = np.array([float(row["bark_x"]), float(row["bark_y"])])
+            e = np.hypot(*(base - pos[tr]))
+            if k != bad:
+                err[row["base_tier"]].append(e)
+                if row["base_tier"] == "B":
+                    bark_err.append(np.hypot(*(bark - pos[tr])))
+            if row["base_tier"] == "C":
+                assert np.allclose(base, bark), row
+            if k == bad:
+                assert row["base_tier"] != "A", "a circle contradicting the girth was accepted"
+        assert len(err["A"]) >= 20, {t: len(v) for t, v in err.items()}
+        assert np.max(err["A"]) <= 0.025, np.max(err["A"])            # circle centre = axis
+        assert len(err["B"]) >= 4, {t: len(v) for t, v in err.items()}       # the one-sided trunks
+        assert np.median(err["B"]) < 0.5 * np.median(bark_err), (np.median(err["B"]), np.median(bark_err))
+        txt = (tmp / "res" / "stemnet_v2_bases.txt").read_text()
+        assert "tier B" in txt and "audit of tier B" in txt, txt
 
 
 if __name__ == "__main__":
