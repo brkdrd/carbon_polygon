@@ -310,7 +310,10 @@ def main():
                     median_cm=float(np.median(np.where(np.isfinite(d_fix[members]), d_fix[members], 9.99)) * 100))
 
     def warn(a):
-        return a["best_offset_cm"] > WARN_M * 100 and a["share_best"] - a["share_fixed"] > WARN_GAIN
+        # a group of a handful of trees prefers some other shift by chance
+        # (block 5, 3 trees, did on the full run): too few to warn about
+        return (a["n"] >= AREA_MIN and a["best_offset_cm"] > WARN_M * 100
+                and a["share_best"] - a["share_fixed"] > WARN_GAIN)
 
     blocks = {}
     for b in sorted(set(sm.block.tolist())):
