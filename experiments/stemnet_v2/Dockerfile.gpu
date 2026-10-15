@@ -1,0 +1,20 @@
+# StemNet v2 training — the GPU image.
+#
+# Builds ON carbonpoly/sonata, which already carries torch 2.7 + CUDA 12.8
+# (Blackwell), spconv, torch-scatter, the sonata package, scipy and matplotlib
+# — build `sonata` first (the run scripts' v2_train target does). It imports
+# nothing from the older tracks; only stemnet_v2's own code goes in.
+FROM carbonpoly/sonata
+
+RUN pip install --no-cache-dir pyproj
+
+# own directory: the base image's /app/train_head.py etc. are not ours
+COPY basewalker/poderevka.csv /app/poderevka.csv
+COPY basewalker/poderevka_attributes.csv /app/poderevka_attributes.csv
+COPY stemnet_v2 /app/stemnet_v2
+# CPU self-check: crops, augmentation, the inference path, a 12-step training
+# run with a stand-in encoder. ~30 s, no GPU, no data.
+COPY tests/test_stemnet_v2_train.py /app/tests/
+
+WORKDIR /app
+CMD ["python", "/app/stemnet_v2/train.py"]

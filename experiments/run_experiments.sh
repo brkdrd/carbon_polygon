@@ -149,6 +149,10 @@ v2_bases()   { log "StemNet v2 — prep part 3: bases = survey + shift, audited 
 v2_labels()  { log "StemNet v2 — prep part 5: per-point labels (CPU)"; $RUN v2_labels; }
 v2_export()  { log "StemNet v2 — export scan columns around 80 survey points (CPU)"; $RUN v2_export; }
 v2_splits()  { log "StemNet v2 — prep part 4: train/val/test regions (CPU)"; $RUN v2_splits; }
+v2_train_build() { log "Building stemnet_v2 GPU image (on the sonata image)"
+                   $DC build sonata; $DC build v2_train_build; }
+v2_train_test() { log "StemNet v2 — training self-check, stand-in encoder (CPU, ~30 s)"; $RUN v2_train_test; }
+v2_train()   { log "StemNet v2 — train: 150,000 steps, val every 5,000 (GPU, ~8–10 h)"; $RUN v2_train; }
 gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
 gw_height() { log "GeoWalker — canopy height vs the label criterion"; $RUN geowalker_height; }
 gw_head()  { log "GeoWalker — can the tree/not-tree head be trained?"; $RUN geowalker_head; }
@@ -211,11 +215,13 @@ case "${1:-all}" in
   v2_labels) v2_build; v2_test; v2_labels ;;
   v2_export) v2_build; v2_export ;;
   v2_prep) v2_build; v2_test; v2_grid; v2_features; v2_bases; v2_splits; v2_labels ;;
+  v2_train_test) v2_train_build; v2_train_test ;;
+  v2_train) v2_train_build; v2_train_test; v2_train ;;
   stemnet) stem_build; stem_test; stem_train; stem_infer; stem_patch ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
 gw_diag|\
 gw_height|gw_head|\
-stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export]"; exit 2 ;;
+stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_train_test|v2_train]"; exit 2 ;;
 esac

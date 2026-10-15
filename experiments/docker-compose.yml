@@ -316,6 +316,31 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/export_columns.py"]
 
+  # Training: frozen Sonata + the gate/offset head. GPU image built FROM
+  # carbonpoly/sonata (build `sonata` first; the v2_train target does).
+  v2_train_build:
+    build: { context: ., dockerfile: stemnet_v2/Dockerfile.gpu }
+    image: carbonpoly/stemnet_v2_gpu
+    command: ["true"]
+
+  # CPU self-check with a stand-in encoder: crops, augmentation, the inference
+  # path, a 12-step run that evaluates, saves and resumes. ~30 s, no data.
+  v2_train_test:
+    image: carbonpoly/stemnet_v2_gpu
+    environment: { DATA_DIR: /tmp/data, RESULTS_DIR: /tmp/results }
+    command: ["python", "/app/tests/test_stemnet_v2_train.py"]
+
+  # The full run: 150,000 steps, val evaluation every 5,000. Resumes from
+  # data/stemnet_v2/models/head_last.pth if present (V2_RESUME=0 starts over).
+  v2_train:
+    <<: *gpu
+    image: carbonpoly/stemnet_v2_gpu
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results,
+                     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/train.py"]
+
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:
     image: carbonpoly/prep
