@@ -259,7 +259,7 @@ services:
   v2_test:
     image: carbonpoly/stemnet_v2
     environment: { DATA_DIR: /tmp/data, RESULTS_DIR: /tmp/results }
-    command: ["sh", "-c", "python /app/tests/test_stemnet_v2_measure.py && python /app/tests/test_stemnet_v2_grid.py && python /app/tests/test_stemnet_v2_features.py && python /app/tests/test_stemnet_v2_bases.py && python /app/tests/test_stemnet_v2_splits.py && python /app/tests/test_stemnet_v2_export.py"]
+    command: ["sh", "-c", "python /app/tests/test_stemnet_v2_measure.py && python /app/tests/test_stemnet_v2_grid.py && python /app/tests/test_stemnet_v2_features.py && python /app/tests/test_stemnet_v2_bases.py && python /app/tests/test_stemnet_v2_splits.py && python /app/tests/test_stemnet_v2_export.py && python /app/tests/test_stemnet_v2_labels.py"]
 
   # Prep part 1: the raw scan on Sonata's 0.02 m grid, one real point per voxel,
   # colour kept, coordinates in the shared frame. CPU only. Scratch space up to
@@ -297,6 +297,16 @@ services:
     environment: { DATA_DIR: /data, RESULTS_DIR: /results }
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/prep_splits.py"]
+
+  # Prep part 5: per-point labels — close to a tree base (gate), the offset to
+  # it, and ignore zones around trunks no survey row claims. CPU, hours: the
+  # trunk finder runs over the whole scan once.
+  v2_labels:
+    image: carbonpoly/stemnet_v2
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/prep_labels.py"]
 
   # Cut the scan out around 80 survey points (40 girth-surveyed, 40 random) into
   # one file, for inspecting survey points against trunks. CPU, minutes.

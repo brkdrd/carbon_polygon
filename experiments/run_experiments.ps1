@@ -202,6 +202,8 @@ function V2Features { Log "StemNet v2 - prep part 2: 12 covariance features, 20 
     Invoke-Stage "v2_features" }
 function V2Bases   { Log "StemNet v2 - prep part 3: bases = survey + shift, audited (CPU)"
     Invoke-Stage "v2_bases" }
+function V2Labels  { Log "StemNet v2 - prep part 5: per-point labels (CPU, hours)"
+    Invoke-Stage "v2_labels" }
 function V2Export  { Log "StemNet v2 - export scan columns around 80 survey points (CPU)"
     Invoke-Stage "v2_export" }
 function V2Splits  { Log "StemNet v2 - prep part 4: train/val/test regions (CPU)"
@@ -266,14 +268,15 @@ switch ($Target) {
     "v2_features" { V2Build; V2Test; V2Features }
     "v2_bases" { V2Build; V2Test; V2Bases }
     "v2_splits" { V2Build; V2Test; V2Splits }
+    "v2_labels" { V2Build; V2Test; V2Labels }
     "v2_export" { V2Build; V2Export }
-    "v2_prep" { V2Build; V2Test; V2Grid; V2Features; V2Bases; V2Splits }
+    "v2_prep" { V2Build; V2Test; V2Grid; V2Features; V2Bases; V2Splits; V2Labels }
     "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_prep|v2_export]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export]"
         exit 2
     }
 }

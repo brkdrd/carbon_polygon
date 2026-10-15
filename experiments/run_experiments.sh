@@ -146,6 +146,7 @@ v2_measure() { log "StemNet v2 — measure the raw scan and the stem map (CPU)";
 v2_grid()    { log "StemNet v2 — prep part 1: Sonata grid, colour, shared frame (CPU)"; $RUN v2_grid; }
 v2_features() { log "StemNet v2 — prep part 2: 12 covariance features, 20 NN (CPU)"; $RUN v2_features; }
 v2_bases()   { log "StemNet v2 — prep part 3: bases = survey + shift, audited (CPU)"; $RUN v2_bases; }
+v2_labels()  { log "StemNet v2 — prep part 5: per-point labels (CPU, hours)"; $RUN v2_labels; }
 v2_export()  { log "StemNet v2 — export scan columns around 80 survey points (CPU)"; $RUN v2_export; }
 v2_splits()  { log "StemNet v2 — prep part 4: train/val/test regions (CPU)"; $RUN v2_splits; }
 gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
@@ -207,13 +208,14 @@ case "${1:-all}" in
   v2_features) v2_build; v2_test; v2_features ;;
   v2_bases) v2_build; v2_test; v2_bases ;;
   v2_splits) v2_build; v2_test; v2_splits ;;
+  v2_labels) v2_build; v2_test; v2_labels ;;
   v2_export) v2_build; v2_export ;;
-  v2_prep) v2_build; v2_test; v2_grid; v2_features; v2_bases; v2_splits ;;
+  v2_prep) v2_build; v2_test; v2_grid; v2_features; v2_bases; v2_splits; v2_labels ;;
   stemnet) stem_build; stem_test; stem_train; stem_infer; stem_patch ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
 gw_diag|\
 gw_height|gw_head|\
-stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_prep|v2_export]"; exit 2 ;;
+stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export]"; exit 2 ;;
 esac
