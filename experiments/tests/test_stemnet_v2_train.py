@@ -182,6 +182,44 @@ def test_training_runs_evaluates_saves_and_resumes():
         assert f"resuming from step {best_step}" in r.stdout, r.stdout[-1500:]
 
 
+def test_kmeans_recovers_separated_blobs():
+    import torch
+    sys.path.insert(0, str(V2))
+    import segment_probe as S
+    rng = np.random.default_rng(0)
+    truth = np.repeat(np.arange(4), 500)
+    X = torch.from_numpy((rng.normal(0, 0.3, (2000, 6)) + np.eye(4, 6)[truth] * 5).astype(np.float32))
+    C, inertia, it = S.kmeans(X, 4, rng)
+    lab = ((X * X).sum(1, keepdim=True) - 2 * X @ C.T + (C * C).sum(1)[None]).argmin(1).numpy()
+    for t in range(4):                                # each blob is exactly one cluster
+        assert len(set(lab[truth == t])) == 1, t
+    assert len(set(lab)) == 4
+
+
+def test_segment_probe_encodes_every_point_in_the_region():
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        env.update(V2_ENCODER="fake", V2_DEVICE="cpu", V2_SEG_SIZE="8", V2_SEG_XY="25,15", V2_SEG_K="2,4",
+                   V2_SEG_FIT="20000", V2_CAP="20000")         # cap forces crops to be split
+        r = subprocess.run([sys.executable, str(V2 / "segment_probe.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        res = Path(t) / "res"
+        log = (res / "stemnet_v2_segment.txt").read_text()
+        assert "over the 20,000 cap" in log and "summary" in log, log[-1500:]
+        for v in ("sonata", "sonata+feat", "sonata+feat_bal"):
+            assert f"== {v} " in log
+            ply = (res / f"stemnet_v2_segment_{v}.ply").read_bytes()
+            n = int(ply.split(b"element vertex ")[1].split(b"\n")[0])
+            _with_env(env)
+            import data as D
+            store = D.TileStore()
+            allxyz = np.concatenate([store.tile(ij)["xyz"] for ij in sorted(store.have)])
+            want = ((allxyz[:, 0] >= 21) & (allxyz[:, 0] < 29) & (allxyz[:, 1] >= 11) & (allxyz[:, 1] < 19)).sum()
+            assert n == want, (v, n, want)
+        for p in ("47_stemnet_v2_segment_top.png", "48_stemnet_v2_segment_side.png"):
+            assert (res / p).stat().st_size > 10000, p
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):
