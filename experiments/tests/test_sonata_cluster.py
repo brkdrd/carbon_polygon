@@ -41,11 +41,15 @@ def _scan(path: Path) -> None:
     las.write(path)
 
 
-def _stand_in(calls):
-    def enc(coord, color, normal):
+def _stand_in(calls, fits=None):
+    """Features from the normal only. With `fits`, a pass of more points than
+    that raises PassTooBig, as a CUDA OOM would."""
+    def enc(coord, color, normal, keep):
+        if fits is not None and len(coord) > fits:
+            raise cs.PassTooBig()
         calls.append(len(coord))
-        nz = np.abs(normal[:, 2:3])
-        return np.c_[nz, 1 - nz, np.zeros((len(coord), 6))].astype(np.float16)
+        nz = np.abs(normal[keep, 2:3])
+        return np.c_[nz, 1 - nz, np.zeros((len(nz), 6))].astype(np.float16)
     return enc
 
 
@@ -83,6 +87,15 @@ def main() -> None:
         assert (d / "out" / "square_seed7_15m_k2.png").stat().st_size > 10_000
         print(f"ok: {meta['points']:,} pts, {len(calls)} passes, "
               f"cluster/geometry agreement {agree:.1%}, coverage {meta['coverage']:.0%}")
+
+        # a pass that does not fit is split until it does; same answer
+        split = []
+        cs.run(cfg, encoder=_stand_in(split, fits=12_000), out_dir=d / "split")
+        lab2 = np.asarray(laspy.read(d / "split" / "square_seed7_15m_k2.laz").cluster)
+        assert len(split) > len(calls) and max(split) <= 12_000, (len(split), max(split))
+        assert (lab2 == lab).all(), "splitting passes changed the clusters"
+        print(f"ok: OOM split -> {len(split)} passes, largest {max(split):,} pts, "
+              "same clusters")
 
 
 if __name__ == "__main__":

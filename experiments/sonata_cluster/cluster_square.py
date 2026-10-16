@@ -17,7 +17,7 @@ Settings (environment):
   SC_SEED     int                   (unset = fresh; printed so a run can be repeated)
   SC_K        number of clusters    (8)
   SC_GRID     Sonata grid, m        (0.02)
-  SC_TILE     Sonata pass size, m   (10; lower it on CUDA OOM)
+  SC_TILE     Sonata pass size, m   (10; passes that OOM split themselves)
   SC_MARGIN   context around a pass (2)
   SC_COVER    min fraction of the square the scan must cover (0.5)
 
@@ -215,7 +215,23 @@ class SonataEncoder:
                  feat_keys=("coord", "color", "normal")),
         ])
 
-    def __call__(self, coord: np.ndarray, color: np.ndarray, normal: np.ndarray):
+    def __call__(self, coord, color, normal, keep):
+        """Embeddings of the points flagged in `keep` (the rest is context).
+        Raises PassTooBig, with the GPU memory released, on CUDA OOM."""
+        torch = self.torch
+        if self.device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+        try:
+            return self._forward(coord, color, normal, keep)
+        except torch.cuda.OutOfMemoryError:
+            pass
+        # out here the exception, and the tensors its frames held, are gone
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        raise PassTooBig()
+
+    def _forward(self, coord, color, normal, keep):
         torch = self.torch
         local = (coord - coord.mean(0)).astype(np.float32)   # centre in f64, then cast
         point = self.transform(dict(coord=local, color=color.astype(np.float32),
@@ -225,49 +241,79 @@ class SonataEncoder:
                 if isinstance(v, torch.Tensor):
                     point[key] = v.to(self.device, non_blocking=True)
             point = self.model(point)
-            for _ in range(2):
+            for _ in range(2):                  # the two coarsest levels: concatenate
                 parent = point.pop("pooling_parent")
                 inverse = point.pop("pooling_inverse")
                 parent.feat = torch.cat([parent.feat, point.feat[inverse]], dim=-1)
                 point = parent
+            # the finer levels only copy features down; follow the indices
+            # instead of building full-resolution copies of the whole pass
+            feat, chain = point.feat, []
             while "pooling_parent" in point.keys():
                 parent = point.pop("pooling_parent")
-                inverse = point.pop("pooling_inverse")
-                parent.feat = point.feat[inverse]
+                chain.append(point.pop("pooling_inverse"))
                 point = parent
-            feat = point.feat[point.inverse].half().cpu().numpy()
+            sel = point.inverse[torch.from_numpy(np.flatnonzero(keep)).to(self.device)]
+            for inverse in reversed(chain):
+                sel = inverse[sel]
+            out = feat[sel].half().cpu().numpy()
         if self.device == "cuda":
+            self.peak_gb = torch.cuda.max_memory_allocated() / 1e9
+            del point, feat, sel, chain
             torch.cuda.empty_cache()
-        return feat
+        return out
 
 
-def embed(encoder, coord, color, normal, tile: float, margin: float) -> np.ndarray:
-    """Encoder over XY tiles: each pass sees its tile plus `margin` of context,
-    and keeps the features of its own tile only, so every point gets exactly one."""
-    lo = coord[:, :2].min(0)
-    span = np.maximum(coord[:, :2].max(0) - lo, 1e-6)
+class PassTooBig(Exception):
+    """An encoder pass did not fit on the GPU."""
+
+
+def embed(encoder, coord, color, normal, tile: float, margin: float,
+          min_tile: float = 1.0) -> np.ndarray:
+    """Encoder over XY tiles: each pass sees its tile plus `margin` of context
+    and keeps the features of its own tile only, so every point gets exactly
+    one. A pass that does not fit on the GPU is split in four and retried, with
+    half the context: at small sizes the margin, not the tile, is the bulk."""
+    xy = coord[:, :2]
+    lo = xy.min(0)
+    span = xy.max(0) - lo + 1e-3                     # top edge inside the last tile
     nt = np.maximum(np.ceil(span / tile).astype(int), 1)
     step = span / nt
-    own = np.minimum(np.floor((coord[:, :2] - lo) / step).astype(int), nt - 1)
-    feat = None
-    for i in range(nt[0]):
-        for j in range(nt[1]):
-            clo = lo + step * [i, j]
-            ctx = np.all((coord[:, :2] >= clo - margin) &
-                         (coord[:, :2] < clo + step + margin), 1)
-            ctx |= (own[:, 0] == i) & (own[:, 1] == j)
-            idx = np.flatnonzero(ctx)
-            mine = (own[idx, 0] == i) & (own[idx, 1] == j)
-            if not mine.any():
-                continue
-            t = time.time()
-            f = encoder(coord[idx], color[idx], normal[idx])
-            if feat is None:
-                feat = np.full((len(coord), f.shape[1]), np.nan, np.float16)
-            feat[idx[mine]] = f[mine]
-            log(f"  pass {i * nt[1] + j + 1}/{nt.prod()}: {len(idx):,} pts in, "
-                f"{mine.sum():,} kept, {f.shape[1]}-d, {time.time() - t:.1f} s")
-    assert not np.isnan(feat).any(), "a point got no embedding"
+    todo = [(lo + step * [i, j], lo + step * [i + 1, j + 1], margin)
+            for i in range(nt[0]) for j in range(nt[1])]
+    feat, done, passes = None, 0, 0
+    while todo:
+        clo, chi, m = todo.pop(0)
+        idx = np.flatnonzero(np.all((xy >= clo - m) & (xy < chi + m), 1))
+        mine = np.all((xy[idx] >= clo) & (xy[idx] < chi), 1)
+        if not mine.any():
+            continue
+        t = time.time()
+        try:
+            f = encoder(coord[idx], color[idx], normal[idx], mine)
+        except PassTooBig:
+            if (chi - clo).max() / 2 < min_tile:
+                raise SystemExit(f"a {(chi - clo).max():.1f} m pass with "
+                                 f"{len(idx):,} points still does not fit on the GPU")
+            mid = (clo + chi) / 2
+            todo[:0] = [(np.array([a0, b0]), np.array([a1, b1]), m / 2)
+                        for a0, a1 in ((clo[0], mid[0]), (mid[0], chi[0]))
+                        for b0, b1 in ((clo[1], mid[1]), (mid[1], chi[1]))]
+            log(f"  {len(idx):,} pts did not fit, splitting a "
+                f"{(chi - clo).max():.1f} m pass (+{m:.2f} m context) in four")
+            continue
+        if feat is None:
+            feat = np.full((len(coord), f.shape[1]), np.nan, np.float16)
+        feat[idx[mine]] = f
+        done += int(mine.sum())
+        passes += 1
+        peak = getattr(encoder, "peak_gb", None)
+        log(f"  pass {passes} ({(chi - clo).max():.1f} m +{m:.2f} m): "
+            f"{len(idx):,} pts in, {mine.sum():,} kept, "
+            f"{f.shape[1]}-d, {time.time() - t:.1f} s"
+            + (f", GPU peak {peak:.1f} GB" if peak else "")
+            + f" — {done / len(coord):.0%} of cells done")
+    assert done == len(coord) and not np.isnan(feat).any(), "a point got no embedding"
     return feat
 
 
@@ -421,8 +467,10 @@ def run(cfg: dict, encoder=None, out_dir: Path | None = None) -> dict:
 if __name__ == "__main__":
     try:
         run(settings())
-    except Exception as e:  # CUDA OOM gets a hint, everything else re-raises
+    except Exception as e:  # CUDA OOM outside the encoder gets a hint too
         if "out of memory" in str(e).lower():
-            sys.exit(f"CUDA out of memory: lower SC_TILE (now "
-                     f"{os.environ.get('SC_TILE', '10')} m) or SC_SQUARE")
+            import traceback
+            traceback.print_exc()
+            sys.exit("CUDA out of memory outside the encoder passes: "
+                     "lower SC_SQUARE")
         raise
