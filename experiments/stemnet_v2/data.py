@@ -35,6 +35,7 @@ LAB_DIR = OUT / f"labels{GRID:g}"
 NORMAL_COLS = (8, 9, 10)                     # normal_x/y/z in the 12-feature tiles
 AUG_P, JIT_P = 0.6, 0.25
 PT_SIGMA, PT_CLIP = 0.02, 0.04
+F16_MAX = 65504.0
 
 
 class TileStore:
@@ -57,7 +58,10 @@ class TileStore:
             else:
                 name = f"tile_{ij[0]}_{ij[1]}.npz"
                 g = np.load(GRID_DIR / name)
-                f = np.load(FEAT_DIR / name)["feat"].astype(np.float32)
+                # sum_eig_cm2 overflows float16 (65,504 cm^2) for isolated points
+                # whose 20 neighbours spread over metres: saturate, don't feed inf
+                f = np.nan_to_num(np.load(FEAT_DIR / name)["feat"].astype(np.float32),
+                                  nan=0.0, posinf=F16_MAX, neginf=-F16_MAX)
                 t = dict(xyz=g["xyz"].astype(np.float64), feat=f,
                          normal=f[:, NORMAL_COLS].astype(np.float32))
                 if self.labels:

@@ -121,8 +121,13 @@ def test_inference_path_finds_every_base_from_perfect_predictions():
 
 
 def test_training_runs_evaluates_saves_and_resumes():
+    import torch
     with tempfile.TemporaryDirectory() as t:
         env, pos, rad = _build(Path(t))
+        for q in sorted((Path(t) / "data" / "stemnet_v2" / "feat0.02").glob("tile_*.npz")):
+            d = dict(np.load(q))                              # run 1 died on this: an isolated
+            d["feat"][::50, 6] = np.inf                       # point overflowing float16
+            np.savez(q, **d)
         env.update(V2_ENCODER="fake", V2_DEVICE="cpu", V2_STEPS="12", V2_EVAL_EVERY="6", V2_ACCUM="1",
                    V2_CAP="40000", V2_PROGRESS_S="0")
         r = subprocess.run([sys.executable, str(V2 / "train.py")], env=env, capture_output=True, text=True)
@@ -130,10 +135,23 @@ def test_training_runs_evaluates_saves_and_resumes():
         log = (Path(t) / "res" / "stemnet_v2_train.txt").read_text()
         assert log.count("EVAL step") == 2 and "done: 12 steps" in log, log[-1500:]
         assert (Path(t) / "data" / "stemnet_v2" / "models" / "head_last.pth").exists()
+        assert "non-finite" not in log and "not applied" not in log, log[-1500:]
+        models = Path(t) / "data" / "stemnet_v2" / "models"
+        ck = torch.load(models / "head_last.pth", weights_only=False)
+        assert all(bool(torch.isfinite(v).all()) for v in ck["head"].values())
         env["V2_STEPS"] = "18"
         r = subprocess.run([sys.executable, str(V2 / "train.py")], env=env, capture_output=True, text=True)
         assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
         assert "resuming from step 12" in r.stdout, r.stdout[-1500:]
+        best_step = torch.load(models / "head_best.pth", weights_only=False)["step"]
+        ck = torch.load(models / "head_last.pth", weights_only=False)   # a NaN'd latest state
+        ck["head"] = {k: v * float("nan") for k, v in ck["head"].items()}
+        torch.save(ck, models / "head_last.pth")
+        env["V2_STEPS"] = "20"
+        r = subprocess.run([sys.executable, str(V2 / "train.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        assert "head_last.pth (step 18) has non-finite weights" in r.stdout, r.stdout[-1500:]
+        assert f"resuming from step {best_step}" in r.stdout, r.stdout[-1500:]
 
 
 if __name__ == "__main__":

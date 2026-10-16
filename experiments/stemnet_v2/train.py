@@ -26,6 +26,15 @@ earlier number) and 0.3 m (placement precision, now meaningful because the
 bases sit within centimetres). The best F1 at 0.5 m is kept; the latest state
 is always saved, and a restart resumes from it (V2_RESUME=0 starts over).
 
+Non-finite guard: a crop whose inputs or loss are not finite is skipped and
+logged with its position; a step whose gradient is not finite is not applied;
+weights that are not finite are never saved; and a resume whose latest state
+is not finite falls back to the best one. (Run 1 lost everything after step
+~18,850 to a single inf feature value.)
+
+The progress line splits each step's time into data (tiles, crop,
+augmentation), encoder (Sonata) and head (forward + backward).
+
 Outputs:
   data/stemnet_v2/models/head_best.pth, head_last.pth
   results/stemnet_v2_train.txt          progress, losses, every evaluation
@@ -121,8 +130,11 @@ class Runner:
         return torch.sigmoid(g).cpu().numpy(), o.cpu().numpy()
 
 
-def crop_loss(runner, c, inner):
-    x = runner.inputs(c)
+def finite(head):
+    return all(bool(torch.isfinite(p).all()) for p in head.parameters())
+
+
+def crop_loss(runner, c, inner, x):
     g, o = runner.head(x)
     m = torch.from_numpy(inner).to(runner.dev)
     y = torch.from_numpy(c["gate"].astype(np.float32)).to(runner.dev)[m]
@@ -164,6 +176,9 @@ def report_eval(step, ev):
 
 
 def save(path, head, opt, step, best, mu, sd, ev):
+    if not finite(head):
+        log(f"  NOT saving {path.name} at step {step}: weights are not finite")
+        return
     MODELS.mkdir(parents=True, exist_ok=True)
     torch.save(dict(head=head.state_dict(), opt=opt.state_dict(), step=step, best=best, mu=mu, sd=sd,
                     d_in=head.d_in, eval={k: v for k, v in (ev or {}).items() if not k.startswith("_")},
@@ -206,7 +221,14 @@ def main():
 
     enc = M.load_sonata(dev) if ENCODER == "sonata" else M.FakeEncoder()
     start, best, mu, sd = 0, -1.0, None, None
-    ck = torch.load(LAST, map_location=dev, weights_only=False) if (RESUME and LAST.exists()) else None
+    ck = None
+    for path in ((LAST, BEST) if RESUME else ()):
+        if path.exists():
+            c_ = torch.load(path, map_location=dev, weights_only=False)
+            if all(bool(torch.isfinite(v).all()) for v in c_["head"].values()):
+                ck = c_
+                break
+            log(f"{path.name} (step {c_['step']}) has non-finite weights — not resuming from it")
     if ck is not None:
         mu, sd = ck["mu"], ck["sd"]
     else:
@@ -221,16 +243,26 @@ def main():
         head.load_state_dict(ck["head"]); opt.load_state_dict(ck["opt"])
         start, best = int(ck["step"]), float(ck["best"])
         log(f"resuming from step {start} (best F1@0.5 so far {best:.3f})")
+        if any(torch.is_tensor(v) and not bool(torch.isfinite(v).all())
+               for st in opt.state.values() for v in st.values()):
+            raise SystemExit("[v2-train] optimizer state is not finite — V2_RESUME=0 to start over")
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 0.5 * (1 + np.cos(np.pi * min(s, STEPS) / STEPS)))
     for _ in range(start):
         sched.step()
     runner = Runner(enc, head, mu, sd, dev)
 
+    def sync():
+        if dev.startswith("cuda"):
+            torch.cuda.synchronize()
+
     run, t0, last, ev = {}, time.time(), time.time(), None
+    skipped_crops = skipped_steps = 0
     for step in range(start + 1, STEPS + 1):
         opt.zero_grad(set_to_none=True)
-        lg_s = lo_s = 0.0; npos = npts = 0
+        lg_s = lo_s = 0.0; npos = npts = 0; used = 0
+        t_data = t_enc = t_head = 0.0
         for _ in range(ACCUM):
+            ta = time.time()
             for _try in range(20):
                 cx, cy = centres[rng.integers(len(centres))] + rng.uniform(-0.5, 0.5, 2)
                 c = store.crop(cx, cy, CROP)
@@ -241,12 +273,33 @@ def main():
                 c = {k: v[sel] for k, v in c.items()}
             inner = (np.abs(c["xyz"][:, 0] - cx) <= INNER / 2) & (np.abs(c["xyz"][:, 1] - cy) <= INNER / 2)
             D.augment(c, rng, np.array([cx, cy]))
-            lg, lo, p_, n_ = crop_loss(runner, c, inner)
+            tb = time.time()
+            x = runner.inputs(c)
+            sync(); tc = time.time()
+            t_data += tb - ta; t_enc += tc - tb
+            bad = "inputs" if not bool(torch.isfinite(x).all()) else None
+            if bad is None:
+                lg, lo, p_, n_ = crop_loss(runner, c, inner, x)
+                if not (bool(torch.isfinite(lg)) and bool(torch.isfinite(lo))):
+                    bad = "loss"
+            if bad is not None:
+                skipped_crops += 1
+                if skipped_crops <= 50:
+                    log(f"  skipped crop at ({cx:.1f}, {cy:.1f}), step {step}: non-finite {bad}")
+                continue
             ((lg + LAMBDA_OFF * lo) / ACCUM).backward()
-            lg_s += float(lg) / ACCUM; lo_s += float(lo) / ACCUM; npos += p_; npts += n_
-        torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
-        opt.step(); sched.step()
-        for k, v in (("gate", lg_s), ("off", lo_s), ("pos", npos / max(npts, 1)), ("pts", npts / ACCUM)):
+            sync(); t_head += time.time() - tc
+            lg_s += float(lg); lo_s += float(lo); npos += p_; npts += n_; used += 1
+        gn = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0) if used else torch.tensor(0.0)
+        if used and bool(torch.isfinite(gn)):
+            opt.step()
+        elif used:
+            skipped_steps += 1
+            log(f"  step {step} not applied: gradient norm {float(gn)}")
+        sched.step()
+        tm = dict(data=t_data, enc=t_enc, head=t_head)
+        for k, v in (("gate", lg_s / max(used, 1)), ("off", lo_s / max(used, 1)), ("pos", npos / max(npts, 1)),
+                     ("pts", npts / max(used, 1)), *tm.items()):
             run[k] = v if k not in run else 0.95 * run[k] + 0.05 * v
         if time.time() - last > PROGRESS_S or step == start + 1:
             last = time.time()
@@ -254,8 +307,10 @@ def main():
             mem = (f" | gpu peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB"
                    if dev.startswith("cuda") else "")
             log(f"step {step}/{STEPS} | gate {run['gate']:.4f} off {run['off'] * 100:.1f} cm | close {run['pos'] * 100:.2f}% "
-                f"of {run['pts']:,.0f} inner pts | lr {sched.get_last_lr()[0]:.2e} | {rate:.2f} s/step, "
-                f"eta {rate * (STEPS - step) / 3600:.1f} h{mem}")
+                f"of {run['pts']:,.0f} inner pts | lr {sched.get_last_lr()[0]:.2e} | {rate:.2f} s/step "
+                f"(data {run['data']:.2f} encoder {run['enc']:.2f} head {run['head']:.2f}), "
+                f"eta {rate * (STEPS - step) / 3600:.1f} h{mem}"
+                + (f" | skipped {skipped_crops} crops, {skipped_steps} steps" if skipped_crops or skipped_steps else ""))
         if step % EVAL_EVERY == 0 or step == STEPS:
             ev, det, score, nv = evaluate(runner, store, gt, tier, bbox, rng)
             report_eval(step, ev)
