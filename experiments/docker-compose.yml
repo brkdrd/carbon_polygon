@@ -307,6 +307,16 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/prep_labels.py"]
 
+  # Prep part 6: the training cache — train/val tiles sorted into 1 m cells
+  # so a crop reads only its own points. CPU, ~10 min, ~20 GB. Skips itself
+  # when already up to date.
+  v2_cache:
+    image: carbonpoly/stemnet_v2
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/prep_cache.py"]
+
   # Cut the scan out around 80 survey points (40 girth-surveyed, 40 random) into
   # one file, for inspecting survey points against trunks. CPU, minutes.
   v2_export:
@@ -330,7 +340,7 @@ services:
     environment: { DATA_DIR: /tmp/data, RESULTS_DIR: /tmp/results }
     command: ["python", "/app/tests/test_stemnet_v2_train.py"]
 
-  # The full run: 150,000 steps, val evaluation every 5,000. Resumes from
+  # The run: 50,000 steps, val evaluation every 5,000. Resumes from
   # data/stemnet_v2/models/head_last.pth if present (V2_RESUME=0 starts over).
   v2_train:
     <<: *gpu

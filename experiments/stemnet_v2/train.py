@@ -60,7 +60,7 @@ import data as D  # noqa: E402
 import model as M  # noqa: E402
 import vote as V  # noqa: E402
 
-STEPS = int(float(os.environ.get("V2_STEPS", "150000")))
+STEPS = int(float(os.environ.get("V2_STEPS", "50000")))
 ACCUM = int(os.environ.get("V2_ACCUM", "4"))
 LR = float(os.environ.get("V2_LR", "1e-3"))
 WD = float(os.environ.get("V2_WD", "1e-4"))
@@ -214,7 +214,7 @@ def main():
                          "NVIDIA runtime (run_experiments gpu_check); refusing to crawl on the CPU")
     dev = DEVICE
     regions = np.load(OUT / "regions.npz")
-    store = D.TileStore()
+    store = D.open_store(log)
     centres = D.eligible_centres(regions, CROP, 0.45, 0)
     gt, tier, bbox = val_truth(regions)
     log(f"{len(centres):,} training crop positions | val square {bbox} with {len(gt)} bases | device {dev}")
@@ -246,9 +246,10 @@ def main():
         if any(torch.is_tensor(v) and not bool(torch.isfinite(v).all())
                for st in opt.state.values() for v in st.values()):
             raise SystemExit("[v2-train] optimizer state is not finite — V2_RESUME=0 to start over")
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 0.5 * (1 + np.cos(np.pi * min(s, STEPS) / STEPS)))
-    for _ in range(start):
-        sched.step()
+    for g in opt.param_groups:
+        g.setdefault("initial_lr", LR)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 0.5 * (1 + np.cos(np.pi * min(s, STEPS) / STEPS)),
+                                              last_epoch=start - 1)
     runner = Runner(enc, head, mu, sd, dev)
 
     def sync():

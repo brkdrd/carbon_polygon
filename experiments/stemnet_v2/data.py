@@ -100,6 +100,70 @@ class TileStore:
         return c
 
 
+class CacheStore:
+    """The sorted training cache (prep_cache.py), read in place: a crop reads
+    one contiguous slice per 1 m column per tile, nothing else. Same crop()
+    and tile() as TileStore; rows are rows of the sorted cache."""
+
+    def __init__(self):
+        self.dir = OUT / f"cache{GRID:g}"
+        self.have = {tuple(int(v) for v in q.name.split("_")[1:]) for q in self.dir.glob("tile_*")}
+        self.n = int(round(TILE))
+        self.mem = {}
+
+    def tile(self, ij):
+        if ij not in self.mem:
+            d = self.dir / f"tile_{ij[0]}_{ij[1]}"
+            self.mem[ij] = ({a: np.load(d / f"{a}.npy", mmap_mode="r")
+                             for a in ("xyz", "feat", "gate", "offset", "cells")} if ij in self.have else None)
+        return self.mem[ij]
+
+    def crop(self, cx, cy, size):
+        h, n = size / 2.0, self.n
+        out = {k: [] for k in ("xyz", "feat", "gate", "offset", "tile", "row")}
+        for a in range(int(np.floor((cx - h) / TILE)), int(np.floor((cx + h) / TILE)) + 1):
+            for b in range(int(np.floor((cy - h) / TILE)), int(np.floor((cy + h) / TILE)) + 1):
+                t = self.tile((a, b))
+                if t is None:
+                    continue
+                c0, c1 = (int(np.clip(np.floor(v - a * TILE), 0, n - 1)) for v in (cx - h, cx + h))
+                r0, r1 = (int(np.clip(np.floor(v - b * TILE), 0, n - 1)) for v in (cy - h, cy + h))
+                cells = t["cells"]
+                for col in range(c0, c1 + 1):
+                    lo, hi = int(cells[col * n + r0]), int(cells[col * n + r1 + 1])
+                    if hi <= lo:
+                        continue
+                    xyz = np.asarray(t["xyz"][lo:hi], np.float64)   # edges compared as TileStore does
+                    k = np.flatnonzero((np.abs(xyz[:, 0] - cx) <= h) & (np.abs(xyz[:, 1] - cy) <= h))
+                    if not len(k):
+                        continue
+                    out["xyz"].append(xyz[k]); out["row"].append(lo + k)
+                    out["feat"].append(np.asarray(t["feat"][lo:hi])[k])
+                    out["gate"].append(np.asarray(t["gate"][lo:hi])[k])
+                    out["offset"].append(np.asarray(t["offset"][lo:hi])[k])
+                    out["tile"].append(np.full(len(k), a * 100000 + b, np.int64))
+        if not out["xyz"]:
+            return None
+        c = {k: np.concatenate(v) for k, v in out.items()}
+        c["feat"] = c["feat"].astype(np.float32)
+        c["offset"] = c["offset"].astype(np.float32)
+        c["normal"] = c["feat"][:, NORMAL_COLS[0]:NORMAL_COLS[2] + 1].copy()
+        return c
+
+
+def open_store(log=print):
+    """The sorted cache when it matches the current labels and features,
+    else the plain tiles (slow: whole tiles per crop) with a warning."""
+    import json
+    import prep_cache
+    frame = json.loads((OUT / "frame.json").read_text())
+    if frame.get("cache", {}).get("stamp") == prep_cache.stamp_of(frame) and (OUT / f"cache{GRID:g}").exists():
+        log(f"reading crops from the sorted cache ({frame['cache']['tiles']} tiles)")
+        return CacheStore()
+    log("!! no up-to-date sorted cache — reading whole tiles per crop (slow); run v2_cache")
+    return TileStore()
+
+
 def eligible_centres(regions, size=8.0, occ_min=0.45, split_id=0):
     """Centres of size x size squares lying wholly in one split, with at least
     occ_min of their 1 m cells scanned (TreeLearn's occupancy gate)."""

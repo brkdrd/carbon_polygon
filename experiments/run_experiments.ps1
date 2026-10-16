@@ -208,12 +208,14 @@ function V2Export  { Log "StemNet v2 - export scan columns around 80 survey poin
     Invoke-Stage "v2_export" }
 function V2Splits  { Log "StemNet v2 - prep part 4: train/val/test regions (CPU)"
     Invoke-Stage "v2_splits" }
+function V2Cache   { Log "StemNet v2 - prep part 6: sorted training cache (CPU, ~10 min, skips if current)"
+    Invoke-Stage "v2_cache" }
 function V2TrainBuild { Log "Building stemnet_v2 GPU image (on the sonata image)"
     Invoke-Docker ($Compose + @("build", "sonata"))
     Invoke-Docker ($Compose + @("build", "v2_train_build")) }
 function V2TrainTest { Log "StemNet v2 - training self-check, stand-in encoder (CPU, ~30 s)"
     Invoke-Stage "v2_train_test" }
-function V2Train   { Log "StemNet v2 - train: 150,000 steps, val every 5,000 (GPU, ~8-10 h)"
+function V2Train   { Log "StemNet v2 - train to 50,000 steps, val every 5,000 (GPU)"
     Invoke-Stage "v2_train" }
 function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function GwHeight { Log "GeoWalker - canopy height vs the label criterion"; Invoke-Stage "geowalker_height" }
@@ -277,15 +279,16 @@ switch ($Target) {
     "v2_splits" { V2Build; V2Test; V2Splits }
     "v2_labels" { V2Build; V2Test; V2Labels }
     "v2_export" { V2Build; V2Export }
-    "v2_prep" { V2Build; V2Test; V2Grid; V2Features; V2Bases; V2Splits; V2Labels }
+    "v2_prep" { V2Build; V2Test; V2Grid; V2Features; V2Bases; V2Splits; V2Labels; V2Cache }
     "v2_train_test" { V2TrainBuild; V2TrainTest }
-    "v2_train" { V2TrainBuild; V2TrainTest; V2Train }
+    "v2_cache" { V2Build; V2Cache }
+    "v2_train" { V2Build; V2Cache; V2TrainBuild; V2TrainTest; V2Train }
     "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_train_test|v2_train]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train]"
         exit 2
     }
 }

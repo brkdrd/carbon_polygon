@@ -56,7 +56,7 @@ def _build(tmp: Path):
     (d / "frame.json").write_text(json.dumps(dict(grids={"0.02": {"stamp": {}}}, bases={}, splits={},
                                                   origin_m=[0, 0, 0], tile_m=TILE)))
     env = dict(os.environ, DATA_DIR=str(tmp / "data"), RESULTS_DIR=str(tmp / "res"), V2_TILE=str(TILE))
-    for stage in ("prep_features.py", "prep_labels.py"):
+    for stage in ("prep_features.py", "prep_labels.py", "prep_cache.py"):
         r = subprocess.run([sys.executable, str(V2 / stage)], env=env, capture_output=True, text=True)
         assert r.returncode == 0, (stage, r.stdout[-2000:], r.stderr[-2000:])
     return env, pos, rad
@@ -90,6 +90,28 @@ def test_crop_equals_brute_force_and_augmentation_keeps_bases():
         got_base = c["xyz"][k, :2] + c["offset"][k]
         assert np.abs(got_base - want_base).max() < 1e-3, np.abs(got_base - want_base).max()
         assert np.allclose(np.linalg.norm(c["normal"], axis=1), 1, atol=1e-4)
+
+
+def test_cache_crops_equal_tile_crops():
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        _with_env(env)
+        import data as D
+        a, b = D.TileStore(), D.CacheStore()
+        assert type(D.open_store(lambda m: None)) is D.CacheStore
+        rng = np.random.default_rng(7)
+        for cx, cy in [(10.0, 10.0), (24.9, 5.0), (3.0, 27.5)] + [tuple(v) for v in rng.uniform(0, W, (12, 2))]:
+            ca, cb = a.crop(cx, cy, 8.0), b.crop(cx, cy, 8.0)
+            if ca is None:
+                assert cb is None; continue
+            oa = np.lexsort(ca["xyz"].T); ob = np.lexsort(cb["xyz"].T)
+            assert len(oa) == len(ob), (cx, cy, len(oa), len(ob))
+            for k in ("xyz", "feat", "gate", "offset", "normal", "tile"):
+                assert np.array_equal(ca[k][oa], cb[k][ob]), (cx, cy, k)
+            t_ = cb["tile"][0]
+            xyz = b.tile((int(t_) // 100000, int(t_) % 100000))["xyz"]
+            m = cb["tile"] == t_
+            assert np.array_equal(np.asarray(xyz)[cb["row"][m]].astype(np.float64), cb["xyz"][m])
 
 
 def test_inference_path_finds_every_base_from_perfect_predictions():
@@ -128,12 +150,18 @@ def test_training_runs_evaluates_saves_and_resumes():
             d = dict(np.load(q))                              # run 1 died on this: an isolated
             d["feat"][::50, 6] = np.inf                       # point overflowing float16
             np.savez(q, **d)
+        fj = Path(t) / "data" / "stemnet_v2" / "frame.json"
+        fr = json.loads(fj.read_text()); fr.pop("cache"); fj.write_text(json.dumps(fr))
+        r = subprocess.run([sys.executable, str(V2 / "prep_cache.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+        assert json.loads(fj.read_text())["cache"]["feature_values_saturated"] > 0
         env.update(V2_ENCODER="fake", V2_DEVICE="cpu", V2_STEPS="12", V2_EVAL_EVERY="6", V2_ACCUM="1",
                    V2_CAP="40000", V2_PROGRESS_S="0")
         r = subprocess.run([sys.executable, str(V2 / "train.py")], env=env, capture_output=True, text=True)
         assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
         log = (Path(t) / "res" / "stemnet_v2_train.txt").read_text()
         assert log.count("EVAL step") == 2 and "done: 12 steps" in log, log[-1500:]
+        assert "reading crops from the sorted cache" in log, log[:1500]
         assert (Path(t) / "data" / "stemnet_v2" / "models" / "head_last.pth").exists()
         assert "non-finite" not in log and "not applied" not in log, log[-1500:]
         models = Path(t) / "data" / "stemnet_v2" / "models"
