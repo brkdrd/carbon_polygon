@@ -8,6 +8,9 @@
 #                                   # exist; exp2/exp4 need a non-Blackwell GPU)
 #   ./run_experiments.sh bw_render  # BaseWalker: 4 chunk images, detections
 #                                   # vs ground truth (needs a trained model)
+#   ./run_experiments.sh cluster    # Sonata embeddings + k-means on one random
+#                                   # square, coloured .laz in results/sonata_cluster
+#                                   # (SC_SEED=… SC_SQUARE=… SC_K=… to steer it)
 #   ./run_experiments.sh geowalker  # GeoWalker: through-cloud distance field,
 #                                   # then train + infer the walker on it
 #                                   # (gw_test | gw_field | gw_train | gw_infer
@@ -156,6 +159,10 @@ v2_train_test() { log "StemNet v2 — training self-check, stand-in encoder (CPU
 v2_train()   { log "StemNet v2 — train to 50,000 steps, val every 5,000 (GPU)"; $RUN v2_train; }
 v2_view()    { log "StemNet v2 — look at the points in squares across the campus (CPU)"; $RUN v2_view; }
 v2_segment() { log "StemNet v2 — probe: frozen Sonata +/- features, k-means, no labels (GPU)"; $RUN v2_segment; }
+sc_build() { log "Building sonata_cluster image (on the sonata image)"
+             $DC build sonata; $DC build sc_build; }
+sc_test()  { log "Sonata cluster — self-check, stand-in encoder (CPU, ~5 s)"; $RUN sc_test; }
+sc_run()   { log "Sonata cluster — random square, embeddings, k-means (GPU)"; $RUN sc_run; }
 gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
 gw_height() { log "GeoWalker — canopy height vs the label criterion"; $RUN geowalker_height; }
 gw_head()  { log "GeoWalker — can the tree/not-tree head be trained?"; $RUN geowalker_head; }
@@ -223,11 +230,13 @@ case "${1:-all}" in
   v2_train) v2_build; v2_cache; v2_train_build; v2_train_test; v2_train ;;
   v2_view) v2_build; v2_view ;;
   v2_segment) v2_train_build; v2_train_test; v2_segment ;;
+  sc_test) sc_build; sc_test ;;
+  cluster) sc_build; sc_test; sc_run ;;
   stemnet) stem_build; stem_test; stem_train; stem_infer; stem_patch ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
 gw_diag|\
 gw_height|gw_head|\
-stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view]"; exit 2 ;;
+stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|cluster|sc_test]"; exit 2 ;;
 esac

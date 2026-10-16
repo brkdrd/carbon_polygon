@@ -372,6 +372,41 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/segment_probe.py"]
 
+  # ---- Sonata cluster: one random square, embeddings, k-means -----------
+  # Image builds FROM carbonpoly/sonata. Settings pass through from the host
+  # when set (SC_SEED, SC_SQUARE, SC_K, ...; see sonata_cluster/cluster_square.py).
+  sc_build:
+    build: { context: ., dockerfile: sonata_cluster/Dockerfile }
+    image: carbonpoly/sonata_cluster
+    command: ["true"]
+
+  # CPU self-check, synthetic scan + stand-in encoder, ~5 s, no data
+  sc_test:
+    image: carbonpoly/sonata_cluster
+    environment: { DATA_DIR: /tmp/data, RESULTS_DIR: /tmp/results }
+    command: ["python", "/app/tests/test_sonata_cluster.py"]
+
+  # writes results/sonata_cluster/square_seed<seed>_<size>m_k<k>.laz/.png/.json
+  sc_run:
+    <<: *gpu
+    image: carbonpoly/sonata_cluster
+    env_file: [.env]
+    environment:
+      - DATA_DIR=/data
+      - RESULTS_DIR=/results
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - SC_SOURCE
+      - SC_SQUARE
+      - SC_CENTER
+      - SC_SEED
+      - SC_K
+      - SC_GRID
+      - SC_TILE
+      - SC_MARGIN
+      - SC_COVER
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/sonata_cluster/cluster_square.py"]
+
   # ---- SegmentAnyTree result rendering (CPU, reuses prep image) ----------
   sat_render_raw:
     image: carbonpoly/prep
