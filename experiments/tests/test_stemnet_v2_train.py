@@ -220,6 +220,33 @@ def test_segment_probe_encodes_every_point_in_the_region():
             assert (res / p).stat().st_size > 10000, p
 
 
+def test_view_squares_draws_every_point():
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        env.update(V2_VIEW_SIZE="8", V2_VIEW_N="2", V2_VIEW_XY="25,15")
+        r = subprocess.run([sys.executable, str(V2 / "view_squares.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        res = Path(t) / "res"
+        log = (res / "stemnet_v2_view.txt").read_text()
+        assert "3 squares" in log, log
+        _with_env(env)
+        import view_squares as VS
+        xyz, rgb = VS.load_square(25.0, 15.0)
+        _with_env(env)
+        import data as D
+        allxyz = np.concatenate([D.TileStore().tile(ij)["xyz"] for ij in sorted(D.TileStore().have)])
+        want = ((np.abs(allxyz[:, 0] - 25) < 4) & (np.abs(allxyz[:, 1] - 15) < 4)).sum()
+        assert len(xyz) == want and f"{want:,} points" in log, (len(xyz), want, log)
+        top, bot, col, empty = VS.raster(xyz, rgb, 21.0, 11.0)      # a pixel is empty iff no point is in it
+        i = np.clip(((xyz[:, 0] - 21) / VS.PX).astype(int), 0, top.shape[0] - 1)
+        j = np.clip(((xyz[:, 1] - 11) / VS.PX).astype(int), 0, top.shape[0] - 1)
+        hit = np.zeros_like(empty); hit[j, i] = True
+        assert np.array_equal(hit, ~empty)
+        for k in range(3):
+            assert (res / f"49_stemnet_v2_view_{k}.png").stat().st_size > 10000, k
+        assert (res / "49_stemnet_v2_view_map.png").exists()
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

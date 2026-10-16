@@ -326,6 +326,15 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/export_columns.py"]
 
+  # Look at the grid points in squares across the campus: pixel images from
+  # above / below / RGB / side, white = no point. CPU, minutes.
+  v2_view:
+    image: carbonpoly/stemnet_v2
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/view_squares.py"]
+
   # Training: frozen Sonata + the gate/offset head. GPU image built FROM
   # carbonpoly/sonata (build `sonata` first; the v2_train target does).
   v2_train_build:
