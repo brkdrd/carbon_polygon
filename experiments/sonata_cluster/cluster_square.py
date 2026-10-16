@@ -197,6 +197,9 @@ class SonataEncoder:
         import torch
         self.torch = torch
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.card_gb = (torch.cuda.get_device_properties(0).total_memory / 1e9
+                        if self.device == "cuda" else None)
+        self.gb_per_point = None                      # learned from each pass's peak
         try:
             import flash_attn  # noqa: F401
             custom = None
@@ -223,8 +226,9 @@ class SonataEncoder:
             torch.cuda.reset_peak_memory_stats()
         try:
             return self._forward(coord, color, normal, keep)
-        except torch.cuda.OutOfMemoryError:
-            pass
+        except RuntimeError as e:   # torch's OutOfMemoryError, or the driver's own
+            if "out of memory" not in str(e).lower():
+                raise
         # out here the exception, and the tensors its frames held, are gone
         import gc
         gc.collect()
@@ -259,9 +263,14 @@ class SonataEncoder:
             out = feat[sel].half().cpu().numpy()
         if self.device == "cuda":
             self.peak_gb = torch.cuda.max_memory_allocated() / 1e9
+            self.gb_per_point = max(self.gb_per_point or 0, self.peak_gb / len(coord))
             del point, feat, sel, chain
             torch.cuda.empty_cache()
         return out
+
+    def fits(self, n: int) -> bool:
+        """Whether n points should fit, judged by the passes so far (85% of the card)."""
+        return self.gb_per_point is None or n * self.gb_per_point < 0.85 * self.card_gb
 
 
 class PassTooBig(Exception):
@@ -290,6 +299,8 @@ def embed(encoder, coord, color, normal, tile: float, margin: float,
             continue
         t = time.time()
         try:
+            if not getattr(encoder, "fits", lambda n: True)(len(idx)):
+                raise PassTooBig()
             f = encoder(coord[idx], color[idx], normal[idx], mine)
         except PassTooBig:
             if (chi - clo).max() / 2 < min_tile:
@@ -471,6 +482,6 @@ if __name__ == "__main__":
         if "out of memory" in str(e).lower():
             import traceback
             traceback.print_exc()
-            sys.exit("CUDA out of memory outside the encoder passes: "
-                     "lower SC_SQUARE")
+            sys.exit("CUDA out of memory (passes split themselves, so this is "
+                     "elsewhere): lower SC_SQUARE")
         raise

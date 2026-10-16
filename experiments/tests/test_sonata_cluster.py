@@ -97,6 +97,29 @@ def main() -> None:
         print(f"ok: OOM split -> {len(split)} passes, largest {max(split):,} pts, "
               "same clusters")
 
+        # the driver's OOM is a plain RuntimeError; it must still become a split
+        enc = object.__new__(cs.SonataEncoder)
+        enc.torch, enc.device = __import__("torch"), "cpu"
+
+        def boom(*_):
+            raise RuntimeError("CUDA driver error: out of memory")
+        enc._forward = boom
+        try:
+            enc(None, None, None, None)
+            raise AssertionError("no PassTooBig")
+        except cs.PassTooBig:
+            pass
+
+        # a pass predicted not to fit is split before it is tried
+        tried = []
+        pred = _stand_in(tried)
+        pred.fits = lambda n: n <= 12_000
+        cs.run(cfg, encoder=pred, out_dir=d / "pred")
+        lab3 = np.asarray(laspy.read(d / "pred" / "square_seed7_15m_k2.laz").cluster)
+        assert max(tried) <= 12_000 and (lab3 == lab).all()
+        print(f"ok: driver OOM -> split; predicted split -> {len(tried)} passes, "
+              "none tried too big, same clusters")
+
 
 if __name__ == "__main__":
     main()
