@@ -120,6 +120,41 @@ def main() -> None:
         print(f"ok: driver OOM -> split; predicted split -> {len(tried)} passes, "
               "none tried too big, same clusters")
 
+        # the paper's 12 features on known geometry
+        g = cs.geometric_features(np.c_[full.x, full.y, full.z][::4])
+        kind4 = np.asarray(full.classification)[::4]
+        col = {n: g[:, i] for i, n in enumerate(cs.GEOM_NAMES)}
+        assert np.isfinite(g).all()
+        for n in ("linearity", "planarity", "sphericity", "anisotropy", "curvature_change",
+                  "verticality"):
+            assert (col[n] >= -1e-6).all() and (col[n] <= 1 + 1e-6).all(), n
+        assert (col["eigenentropy"] <= np.log(3) + 1e-6).all()
+        assert np.allclose(np.linalg.norm(g[:, 8:11], axis=1), 1, atol=1e-4)
+        v_trunk = np.median(col["verticality"][kind4 == 1])
+        v_ground = np.median(col["verticality"][kind4 == 0])
+        p_ground = np.median(col["planarity"][kind4 == 0])
+        assert v_trunk > 0.9 and v_ground < 0.1 and p_ground > 0.5, (v_trunk, v_ground, p_ground)
+
+        # concatenated: a Sonata stand-in that says nothing, so the split must
+        # come from the 12-feature block; and SC_FROM=latest is the same square
+        def blank(coord, color, normal, keep):
+            return np.ones((int(keep.sum()), 8), np.float16)
+        # (k=4: the raw normal x/y put trunk sides facing +x and -x far apart,
+        # so k=2 may split trunks by facing; purity is the fair measure)
+        gcfg = dict(cfg, k=4, seed=999, features="sonata+geom", geom_weight=1.0,
+                    reuse="latest")
+        gmeta = cs.run(gcfg, encoder=blank, out_dir=d / "out")
+        assert gmeta["corner"] == meta["corner"] and gmeta["seed"] == 7 and gmeta["k"] == 4
+        assert gmeta["cluster_dim"] == 8 + 12 and gmeta["features"] == "sonata+geom"
+        go = laspy.read(d / "out" / "square_seed7_15m_k4_geom.laz")
+        assert len(go.points) == meta["points"]
+        gl, gk = np.asarray(go.cluster), np.asarray(go.classification)
+        gagree = sum(np.bincount(gk[gl == c]).max() for c in np.unique(gl)) / len(gl)
+        assert gagree > 0.95, f"12-feature block did not drive the split: {gagree:.1%}"
+        print(f"ok: 12 features sane (verticality trunk {v_trunk:.2f} / ground "
+              f"{v_ground:.2f}, ground planarity {p_ground:.2f}); same square reused; "
+              f"blank Sonata + geom, k=4 purity {gagree:.1%}")
+
 
 if __name__ == "__main__":
     main()

@@ -5,7 +5,12 @@
    from a few thousand seeks into the .laz, not a full read.
 2. Read every point inside that square in one streaming pass over the file.
 3. Run frozen, pretrained Sonata to get an embedding for every point.
-4. Run k-means in that embedding space (cosine / spherical).
+   Optionally (SC_FEATURES=sonata+geom) concatenate the 12 engineered
+   covariance features of Liu et al., Forests 2026, 17, 36 (20 NN, after
+   Weinmann et al. 2017): linearity, planarity, sphericity, omnivariance,
+   anisotropy, eigenentropy, sum of eigenvalues, change of curvature, the
+   normal (3) and verticality.
+4. Run k-means in that space (cosine / spherical).
 5. Write the square back out as a .laz in the scan's own coordinates. Every
    point is coloured by its cluster, and the cluster id is stored as an extra
    dimension. A preview PNG and a JSON with the run's numbers sit next to it.
@@ -20,6 +25,11 @@ Settings (environment):
   SC_TILE     Sonata pass size, m   (10; passes that OOM split themselves)
   SC_MARGIN   context around a pass (2)
   SC_COVER    min fraction of the square the scan must cover (0.5)
+  SC_FEATURES sonata | sonata+geom  (sonata)
+  SC_GEOM_WEIGHT  weight of the 12-feature block against the Sonata block (1:
+              both blocks carry the same expected squared norm)
+  SC_FROM     a previous run's .json, or "latest" (newest in the output
+              folder): reuse its square, seed and k (an explicit SC_K wins)
 
 Coordinates stay float64 until each Sonata pass has been centred; only then
 are they cast to float32.
@@ -53,11 +63,14 @@ def settings() -> dict:
         square=float(env("SC_SQUARE", "15")),
         center=tuple(float(v) for v in center.split(",")) if center else None,
         seed=int(seed) if seed else int.from_bytes(os.urandom(4), "little"),
-        k=int(env("SC_K", "8")),
+        k=int(env("SC_K")) if env("SC_K") else None,
         grid=float(env("SC_GRID", "0.02")),
         tile=float(env("SC_TILE", "10")),
         margin=float(env("SC_MARGIN", "2")),
         cover=float(env("SC_COVER", "0.5")),
+        features=env("SC_FEATURES") or "sonata",
+        geom_weight=float(env("SC_GEOM_WEIGHT") or 1.0),
+        reuse=env("SC_FROM") or None,
     )
 
 
@@ -187,6 +200,58 @@ def normals(xyz: np.ndarray, k: int = 16, batch: int = 500_000) -> np.ndarray:
         n[n[:, 2] < 0] *= -1
         out[s:s + batch] = n
     return out
+
+
+GEOM_NAMES = ("linearity", "planarity", "sphericity", "omnivariance", "anisotropy",
+              "eigenentropy", "eigen_sum", "curvature_change",
+              "normal_x", "normal_y", "normal_z", "verticality")
+
+
+def geometric_features(xyz: np.ndarray, k: int = 20,
+                       batch: int = 500_000) -> np.ndarray:
+    """The paper's 12 features from the covariance of each point's k = 20
+    nearest neighbours (itself included). Eigenvalues l1 >= l2 >= l3, and
+    e_i = l_i / (l1 + l2 + l3):
+      linearity (l1-l2)/l1, planarity (l2-l3)/l1, sphericity l3/l1,
+      omnivariance (e1 e2 e3)^(1/3), anisotropy (l1-l3)/l1,
+      eigenentropy -sum e_i ln e_i, sum of eigenvalues l1+l2+l3,
+      change of curvature l3/(l1+l2+l3),
+      normal = eigenvector of l3 (flipped up), verticality 1 - |n_z|."""
+    from scipy.spatial import cKDTree
+    tree = cKDTree(xyz)
+    out = np.empty((len(xyz), 12), np.float32)
+    for s in range(0, len(xyz), batch):
+        _, idx = tree.query(xyz[s:s + batch], k=min(k, len(xyz)), workers=-1)
+        nb = xyz[idx]
+        nb = nb - nb.mean(1, keepdims=True)
+        val, vec = np.linalg.eigh(np.einsum("nki,nkj->nij", nb, nb) / nb.shape[1])
+        l3, l2, l1 = (np.maximum(val[:, i], 1e-12) for i in range(3))
+        tot = l1 + l2 + l3
+        e = np.stack([l1, l2, l3], 1) / tot[:, None]
+        n = vec[:, :, 0]
+        n[n[:, 2] < 0] *= -1
+        out[s:s + batch] = np.c_[
+            (l1 - l2) / l1, (l2 - l3) / l1, l3 / l1,
+            np.cbrt(e.prod(1)), (l1 - l3) / l1,
+            -(e * np.log(e)).sum(1), tot, l3 / tot,
+            n, 1 - np.abs(n[:, 2])]
+    return out
+
+
+def scale_block(f: np.ndarray, weight: float) -> np.ndarray:
+    """Each column mapped from its 1st..99th percentile to 0..1 and clipped
+    (the heavy-tailed sum of eigenvalues cannot run away), then centred, and the
+    block scaled so its expected squared norm is weight^2: the same as the
+    unit-norm Sonata block's at weight 1.
+
+    Not an IQR z-score: verticality is bimodal with ground the majority, so
+    its IQR is ground noise, and dividing by it lifts that noise to the
+    trunks' value."""
+    lo, hi = np.percentile(f, [1, 99], 0)
+    z = np.clip((f - lo) / np.maximum(hi - lo, 1e-12), 0, 1)
+    z -= z.mean(0)
+    z /= np.sqrt(np.mean(np.sum(z ** 2, 1)) + 1e-12)
+    return (weight * z).astype(np.float32)
 
 
 class SonataEncoder:
@@ -330,10 +395,13 @@ def embed(encoder, coord, color, normal, tile: float, margin: float,
 
 # ---- 4. clustering in embedding space ---------------------------------------
 
-def kmeans(feat: np.ndarray, k: int, seed: int, iters: int = 50,
-           batch: int = 200_000) -> np.ndarray:
+def kmeans(feat: np.ndarray, k: int, seed: int, extra: np.ndarray | None = None,
+           iters: int = 50, batch: int = 200_000) -> np.ndarray:
     """Spherical k-means (cosine), k-means++ seeding on a sample. Runs on the
-    GPU when there is one, holding the features there if they fit."""
+    GPU when there is one, holding the features there if they fit.
+
+    With `extra`, every row is [unit-norm Sonata row, extra row], normalised
+    again: the concatenation is built batch by batch, never as a whole copy."""
     import torch
     import torch.nn.functional as F
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -342,9 +410,15 @@ def kmeans(feat: np.ndarray, k: int, seed: int, iters: int = 50,
     if dev == "cuda" and feat.nbytes < 0.5 * torch.cuda.mem_get_info()[0]:
         src = src.to(dev)
 
+    ex = torch.from_numpy(extra).to(dev) if extra is not None else None
+
     def rows(a, b=None):
         x = src[a] if b is None else src[a:b]
-        return F.normalize(x.to(dev).float(), dim=1)
+        x = F.normalize(x.to(dev).float(), dim=1)
+        if ex is not None:
+            x = F.normalize(torch.cat([x, ex[a.to(dev)] if b is None else ex[a:b]], 1),
+                            dim=1)
+        return x
 
     n = len(feat)
     S = rows(torch.from_numpy(np.sort(rng.choice(n, min(n, 50_000), replace=False))))
@@ -388,13 +462,14 @@ def palette(k: int) -> np.ndarray:
     return np.array([cmap(i / max(k - 1, 1) if k > 20 else i)[:3] for i in range(k)])
 
 
-def write_scene(las, labels: np.ndarray, k: int, path: Path) -> None:
+def write_scene(las, labels: np.ndarray, k: int, path: Path,
+                space: str = "Sonata space") -> None:
     if "red" not in las.point_format.dimension_names:
         las = laspy.convert(las, point_format_id=7 if las.point_format.id >= 6 else 3)
     rgb = (palette(k)[labels] * 65535).round().astype(np.uint16)
     las.red, las.green, las.blue = rgb[:, 0], rgb[:, 1], rgb[:, 2]
     las.add_extra_dim(laspy.ExtraBytesParams(name="cluster", type=np.uint16,
-                                             description="k-means id, Sonata space"))
+                                             description=f"k-means id, {space}"[:31]))
     las.cluster = labels.astype(np.uint16)
     las.write(path)
 
@@ -428,12 +503,29 @@ def run(cfg: dict, encoder=None, out_dir: Path | None = None) -> dict:
     t0 = time.time()
     out_dir = out_dir or RESULTS / "sonata_cluster"
     out_dir.mkdir(parents=True, exist_ok=True)
+    cfg = dict(cfg)
+    corner = None
+    if cfg.get("reuse"):
+        prev_path = (max(out_dir.glob("square_*.json"), key=lambda q: q.stat().st_mtime,
+                         default=None) if cfg["reuse"] == "latest" else Path(cfg["reuse"]))
+        if prev_path is None:
+            raise SystemExit(f"SC_FROM=latest but no square_*.json in {out_dir}; "
+                             "run `cluster` first or set SC_SEED / SC_CENTER")
+        prev = json.loads(prev_path.read_text())
+        corner = tuple(prev["corner"])
+        cfg.update(seed=prev["seed"], square=prev["square_m"], k=cfg["k"] or prev["k"])
+        log(f"same square as {prev_path.name}: corner ({corner[0]:.2f}, "
+            f"{corner[1]:.2f}), {cfg['square']:g} m, seed {cfg['seed']}, k={cfg['k']}")
+    cfg["k"] = cfg["k"] or 8
+    geom = cfg.get("features", "sonata") == "sonata+geom"
     rng = np.random.default_rng(cfg["seed"])
     src = find_source(cfg["source"])
     log(f"source {src} ({src.stat().st_size / 1e9:.1f} GB), seed {cfg['seed']}")
 
     size = cfg["square"]
-    if cfg["center"]:
+    if corner:
+        (x0, y0), cover = corner, None
+    elif cfg["center"]:
         x0, y0 = cfg["center"][0] - size / 2, cfg["center"][1] - size / 2
         cover = None
     else:
@@ -455,18 +547,33 @@ def run(cfg: dict, encoder=None, out_dir: Path | None = None) -> dict:
     encoder = encoder or SonataEncoder(cfg["grid"])
     log("embedding")
     feat = embed(encoder, vox, vcol, vnorm, cfg["tile"], cfg["margin"])
-    log(f"clustering {nv:,} x {feat.shape[1]} into k={cfg['k']}")
-    labels = kmeans(feat, cfg["k"], cfg["seed"])[inv]  # cell label -> every point
+    extra = None
+    if geom:
+        log("12 geometric features, 20 NN (Liu et al. 2026)")
+        g = geometric_features(vox)
+        for name, col in zip(GEOM_NAMES, g.T):
+            log(f"  {name:17s} median {np.median(col):9.4f}  "
+                f"p5..p95 {np.percentile(col, 5):9.4f} .. {np.percentile(col, 95):9.4f}")
+        extra = scale_block(g, cfg.get("geom_weight", 1.0))
+    dim = feat.shape[1] + (0 if extra is None else extra.shape[1])
+    log(f"clustering {nv:,} x {dim} into k={cfg['k']}")
+    labels = kmeans(feat, cfg["k"], cfg["seed"], extra)[inv]  # cell label -> every point
 
-    stem = f"square_seed{cfg['seed']}_{size:g}m_k{cfg['k']}"
-    write_scene(las, labels, cfg["k"], out_dir / f"{stem}.laz")
-    title = (f"Sonata embeddings + k-means (k={cfg['k']}), {size:g} m square at "
+    stem = f"square_seed{cfg['seed']}_{size:g}m_k{cfg['k']}" + ("_geom" if geom else "")
+    space = "Sonata + 12 geom" if geom else "Sonata space"
+    write_scene(las, labels, cfg["k"], out_dir / f"{stem}.laz", space)
+    title = (f"{'Sonata + 12 geometric features' if geom else 'Sonata embeddings'}"
+             f" + k-means (k={cfg['k']}), {size:g} m square at "
              f"({x0 + size / 2:.1f}, {y0 + size / 2:.1f}), {len(xyz):,} points")
     write_preview(xyz, labels, cfg["k"], title, out_dir / f"{stem}.png")
     meta = dict(source=str(src), seed=cfg["seed"], square_m=size,
                 corner=[x0, y0], center=[x0 + size / 2, y0 + size / 2],
                 coverage=cover, points=int(len(xyz)), cells=nv, grid_m=cfg["grid"],
                 embedding_dim=int(feat.shape[1]), k=cfg["k"],
+                features=cfg.get("features", "sonata"),
+                geom_features=list(GEOM_NAMES) if geom else None,
+                geom_weight=cfg.get("geom_weight", 1.0) if geom else None,
+                cluster_dim=dim,
                 cluster_share=[float(np.mean(labels == c)) for c in range(cfg["k"])],
                 seconds=round(time.time() - t0, 1))
     (out_dir / f"{stem}.json").write_text(json.dumps(meta, indent=2))

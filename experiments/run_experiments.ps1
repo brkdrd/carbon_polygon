@@ -15,6 +15,8 @@
     .\run_experiments.ps1 cluster    # Sonata embeddings + k-means on one random
                                      # square, coloured .laz in results\sonata_cluster
                                      # ($env:SC_SEED / SC_SQUARE / SC_K to steer it)
+    .\run_experiments.ps1 cluster_geom # same square again, Sonata + the paper's
+                                     # 12 covariance features concatenated
     .\run_experiments.ps1 geowalker  # GeoWalker: through-cloud distance field,
                                      # then train + infer the walker on it
     .\run_experiments.ps1 gw_infer_patch # inference on the attributed ~2 ha
@@ -231,6 +233,8 @@ function ScTest  { Log "Sonata cluster - self-check, stand-in encoder (CPU, ~5 s
     Invoke-Stage "sc_test" }
 function ScRun   { Log "Sonata cluster - random square, embeddings, k-means (GPU)"
     Invoke-Stage "sc_run" }
+function ScGeom  { Log "Sonata cluster - same square, Sonata + 12 geometric features (GPU)"
+    Invoke-Stage "sc_geom" }
 function GwDiag  { Log "GeoWalker - recall diagnostics"; Invoke-Stage "geowalker_diag" }
 function GwHeight { Log "GeoWalker - canopy height vs the label criterion"; Invoke-Stage "geowalker_height" }
 function GwHead  { Log "GeoWalker - can the tree/not-tree head be trained?"; Invoke-Stage "geowalker_head" }
@@ -300,13 +304,14 @@ switch ($Target) {
     "v2_segment" { V2TrainBuild; V2TrainTest; V2Segment }
     "sc_test" { ScBuild; ScTest }
     "cluster" { ScBuild; ScTest; ScRun }
+    "cluster_geom" { ScBuild; ScTest; ScGeom }
     "v2_view" { V2Build; V2View }
     "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|cluster|sc_test]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|cluster|cluster_geom|sc_test]"
         exit 2
     }
 }

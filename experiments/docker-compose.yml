@@ -404,6 +404,31 @@ services:
       - SC_TILE
       - SC_MARGIN
       - SC_COVER
+      - SC_FEATURES
+      - SC_GEOM_WEIGHT
+      - SC_FROM
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/sonata_cluster/cluster_square.py"]
+
+  # Sonata embeddings + the 12 covariance features of Liu et al. 2026 (20 NN),
+  # concatenated, on the SAME square as the newest sc_run result (SC_FROM
+  # defaults to latest). Writes ..._geom.laz/.png/.json next to it.
+  sc_geom:
+    <<: *gpu
+    image: carbonpoly/sonata_cluster
+    env_file: [.env]
+    environment:
+      - DATA_DIR=/data
+      - RESULTS_DIR=/results
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - SC_FEATURES=sonata+geom
+      - SC_FROM=${SC_FROM:-latest}
+      - SC_GEOM_WEIGHT
+      - SC_SOURCE
+      - SC_K
+      - SC_GRID
+      - SC_TILE
+      - SC_MARGIN
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/sonata_cluster/cluster_square.py"]
 
