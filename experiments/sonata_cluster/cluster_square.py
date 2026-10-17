@@ -18,13 +18,20 @@
 Settings (environment):
   SC_SOURCE   path to the .laz      (default: the campus scan under DATA_DIR/raw)
   SC_SQUARE   square side, m        (15)
-  SC_CENTER   "x,y" in scan coords  (unset = random)
+  SC_CENTER   "x,y" in scan coords, or "bbox" = the middle of the scan's
+              bounding box (the Sonata + SEGR notebooks' 100 m tile)
+              (unset = random)
   SC_SEED     int                   (unset = fresh; printed so a run can be repeated)
   SC_K        number of clusters    (8)
   SC_GRID     Sonata grid, m        (0.02)
   SC_TILE     Sonata pass size, m   (10; passes that OOM split themselves)
   SC_MARGIN   context around a pass (2)
   SC_COVER    min fraction of the square the scan must cover (0.5)
+  SC_FEAT_GB  host RAM the embeddings may take (8). Above it (a 100 m tile is
+              ~100 GB) k-means is fitted on a random SC_FIT_CELLS sample of
+              cells, then Sonata runs again and every cell is labelled
+              against those centres as its embedding comes out
+  SC_FIT_CELLS  cells in that sample (500000)
   SC_FEATURES sonata | sonata+geom  (sonata)
   SC_GEOM_WEIGHT  weight of the 12-feature block against the Sonata block (1:
               both blocks carry the same expected squared norm)
@@ -61,7 +68,8 @@ def settings() -> dict:
     return dict(
         source=env("SC_SOURCE"),
         square=float(env("SC_SQUARE", "15")),
-        center=tuple(float(v) for v in center.split(",")) if center else None,
+        center=("bbox" if center == "bbox" else
+                tuple(float(v) for v in center.split(",")) if center else None),
         seed=int(seed) if seed else int.from_bytes(os.urandom(4), "little"),
         k=int(env("SC_K")) if env("SC_K") else None,
         grid=float(env("SC_GRID", "0.02")),
@@ -71,6 +79,8 @@ def settings() -> dict:
         features=env("SC_FEATURES") or "sonata",
         geom_weight=float(env("SC_GEOM_WEIGHT") or 1.0),
         reuse=env("SC_FROM") or None,
+        feat_gb=float(env("SC_FEAT_GB") or 8),
+        fit_cells=int(env("SC_FIT_CELLS") or 500_000),
     )
 
 
@@ -131,8 +141,8 @@ def pick_square(xy: np.ndarray, size: float, rng: np.random.Generator,
 
 # ---- 2. the points of the square -------------------------------------------
 
-def read_square(path: Path, x0: float, y0: float, size: float):
-    """Every point with x0 <= x < x0+size, y0 <= y < y0+size, as the file's own
+def read_square(path: Path, x0: float, x1: float, y0: float, y1: float):
+    """Every point with x0 <= x < x1, y0 <= y < y1, as the file's own
     point records (all dimensions kept, stored integers copied untouched). The
     test uses laspy's own float64 x/y, so a point on the edge falls the same
     side as it would for anyone reading the file."""
@@ -143,7 +153,7 @@ def read_square(path: Path, x0: float, y0: float, size: float):
         keep, seen, t = [], 0, time.time()
         for pts in r.chunk_iterator(5_000_000):
             x, y = np.asarray(pts.x), np.asarray(pts.y)
-            m = (x >= x0) & (x < x0 + size) & (y >= y0) & (y < y0 + size)
+            m = (x >= x0) & (x < x1) & (y >= y0) & (y < y1)
             a = pts.array
             if m.any():
                 keep.append(a[m].copy())
@@ -342,12 +352,13 @@ class PassTooBig(Exception):
     """An encoder pass did not fit on the GPU."""
 
 
-def embed(encoder, coord, color, normal, tile: float, margin: float,
-          min_tile: float = 1.0) -> np.ndarray:
+def embed(encoder, coord, color, normal, tile: float, margin: float, sink,
+          min_tile: float = 1.0) -> int:
     """Encoder over XY tiles: each pass sees its tile plus `margin` of context
     and keeps the features of its own tile only, so every point gets exactly
-    one. A pass that does not fit on the GPU is split in four and retried, with
-    half the context: at small sizes the margin, not the tile, is the bulk."""
+    one; `sink(cells, features)` receives them pass by pass. A pass that does
+    not fit on the GPU is split in four and retried, with half the context: at
+    small sizes the margin, not the tile, is the bulk. Returns the width."""
     xy = coord[:, :2]
     lo = xy.min(0)
     span = xy.max(0) - lo + 1e-3                     # top edge inside the last tile
@@ -355,7 +366,7 @@ def embed(encoder, coord, color, normal, tile: float, margin: float,
     step = span / nt
     todo = [(lo + step * [i, j], lo + step * [i + 1, j + 1], margin)
             for i in range(nt[0]) for j in range(nt[1])]
-    feat, done, passes = None, 0, 0
+    dim, done, passes = None, 0, 0
     while todo:
         clo, chi, m = todo.pop(0)
         idx = np.flatnonzero(np.all((xy >= clo - m) & (xy < chi + m), 1))
@@ -378,9 +389,8 @@ def embed(encoder, coord, color, normal, tile: float, margin: float,
             log(f"  {len(idx):,} pts did not fit, splitting a "
                 f"{(chi - clo).max():.1f} m pass (+{m:.2f} m context) in four")
             continue
-        if feat is None:
-            feat = np.full((len(coord), f.shape[1]), np.nan, np.float16)
-        feat[idx[mine]] = f
+        sink(idx[mine], f)
+        dim = f.shape[1]
         done += int(mine.sum())
         passes += 1
         peak = getattr(encoder, "peak_gb", None)
@@ -389,16 +399,25 @@ def embed(encoder, coord, color, normal, tile: float, margin: float,
             f"{f.shape[1]}-d, {time.time() - t:.1f} s"
             + (f", GPU peak {peak:.1f} GB" if peak else "")
             + f" — {done / len(coord):.0%} of cells done")
-    assert done == len(coord) and not np.isnan(feat).any(), "a point got no embedding"
-    return feat
+    assert done == len(coord), "a point got no embedding"
+    return dim
 
 
 # ---- 4. clustering in embedding space ---------------------------------------
 
-def kmeans(feat: np.ndarray, k: int, seed: int, extra: np.ndarray | None = None,
-           iters: int = 50, batch: int = 200_000) -> np.ndarray:
-    """Spherical k-means (cosine), k-means++ seeding on a sample. Runs on the
-    GPU when there is one, holding the features there if they fit.
+def _unit(x, e, F):
+    """Unit Sonata rows; with an extra block, [unit row, extra row] normalised."""
+    import torch
+    x = F.normalize(x.float(), dim=1)
+    if e is None:
+        return x
+    return F.normalize(torch.cat([x, e.to(x.device).float()], 1), dim=1)
+
+
+def fit_kmeans(feat: np.ndarray, k: int, seed: int, extra: np.ndarray | None = None,
+               iters: int = 50, batch: int = 200_000):
+    """Spherical k-means (cosine) centres, k-means++ seeding on a sample. Runs
+    on the GPU when there is one, holding the features there if they fit.
 
     With `extra`, every row is [unit-norm Sonata row, extra row], normalised
     again: the concatenation is built batch by batch, never as a whole copy."""
@@ -409,19 +428,14 @@ def kmeans(feat: np.ndarray, k: int, seed: int, extra: np.ndarray | None = None,
     src = torch.from_numpy(feat)
     if dev == "cuda" and feat.nbytes < 0.5 * torch.cuda.mem_get_info()[0]:
         src = src.to(dev)
-
     ex = torch.from_numpy(extra).to(dev) if extra is not None else None
 
-    def rows(a, b=None):
-        x = src[a] if b is None else src[a:b]
-        x = F.normalize(x.to(dev).float(), dim=1)
-        if ex is not None:
-            x = F.normalize(torch.cat([x, ex[a.to(dev)] if b is None else ex[a:b]], 1),
-                            dim=1)
-        return x
+    def rows(b, e):
+        return _unit(src[b:e].to(dev), None if ex is None else ex[b:e], F)
 
     n = len(feat)
-    S = rows(torch.from_numpy(np.sort(rng.choice(n, min(n, 50_000), replace=False))))
+    si = torch.from_numpy(np.sort(rng.choice(n, min(n, 50_000), replace=False)))
+    S = _unit(src[si.to(src.device)].to(dev), None if ex is None else ex[si.to(dev)], F)
     C = [S[rng.integers(len(S))]]
     d = (1 - S @ C[0]).clamp_min(0)
     for _ in range(1, k):
@@ -430,10 +444,6 @@ def kmeans(feat: np.ndarray, k: int, seed: int, extra: np.ndarray | None = None,
         C.append(S[i])
         d = torch.minimum(d, (1 - S @ S[i]).clamp_min(0))
     C = torch.stack(C)
-
-    def assign():
-        return torch.cat([(rows(b, b + batch) @ C.T).argmax(1)
-                          for b in range(0, n, batch)])
 
     for it in range(iters):
         sums = torch.zeros_like(C)
@@ -448,10 +458,33 @@ def kmeans(feat: np.ndarray, k: int, seed: int, extra: np.ndarray | None = None,
         C = new
         if shift < 1e-6:
             break
-    log(f"  k-means: {it + 1} iterations, last centre shift {shift:.2e}")
-    lab = assign().cpu().numpy()
-    order = np.argsort(-np.bincount(lab, minlength=k))   # cluster 0 = largest
-    return np.argsort(order)[lab]
+    log(f"  k-means on {n:,} cells: {it + 1} iterations, last centre shift {shift:.2e}")
+    return C
+
+
+def assign_kmeans(feat: np.ndarray, C, extra: np.ndarray | None = None,
+                  batch: int = 200_000) -> np.ndarray:
+    """Nearest centre (cosine) of every row."""
+    import torch
+    import torch.nn.functional as F
+    out = []
+    for b in range(0, len(feat), batch):
+        x = torch.from_numpy(feat[b:b + batch]).to(C.device)
+        e = None if extra is None else torch.from_numpy(extra[b:b + batch])
+        out.append((_unit(x, e, F) @ C.T).argmax(1).cpu().numpy())
+    return np.concatenate(out) if out else np.empty(0, np.int64)
+
+
+def by_size(labels: np.ndarray, k: int) -> np.ndarray:
+    """Renumber so that cluster 0 is the largest."""
+    order = np.argsort(-np.bincount(labels, minlength=k))
+    return np.argsort(order)[labels]
+
+
+def kmeans(feat: np.ndarray, k: int, seed: int,
+           extra: np.ndarray | None = None) -> np.ndarray:
+    """Fit on every row, label every row, cluster 0 = largest."""
+    return by_size(assign_kmeans(feat, fit_kmeans(feat, k, seed, extra), extra), k)
 
 
 # ---- 5. output --------------------------------------------------------------
@@ -523,8 +556,17 @@ def run(cfg: dict, encoder=None, out_dir: Path | None = None) -> dict:
     log(f"source {src} ({src.stat().st_size / 1e9:.1f} GB), seed {cfg['seed']}")
 
     size = cfg["square"]
+    x1 = y1 = None
     if corner:
         (x0, y0), cover = corner, None
+    elif cfg["center"] == "bbox":
+        # exactly the notebooks' tile: centre = (mins + maxs) / 2 of the header,
+        # bounds = centre -+ half
+        with laspy.open(src) as r:
+            c = (np.array(r.header.mins[:2]) + np.array(r.header.maxs[:2])) / 2
+        x0, x1, y0, y1 = c[0] - size / 2, c[0] + size / 2, c[1] - size / 2, c[1] + size / 2
+        cover = None
+        log(f"bounding-box centre ({c[0]:.2f}, {c[1]:.2f})")
     elif cfg["center"]:
         x0, y0 = cfg["center"][0] - size / 2, cfg["center"][1] - size / 2
         cover = None
@@ -532,9 +574,11 @@ def run(cfg: dict, encoder=None, out_dir: Path | None = None) -> dict:
         xy = sample_xy(src, rng)
         (x0, y0), cover = pick_square(xy, size, rng, cfg["cover"])
         log(f"square from {len(xy):,} sampled points, coverage {cover:.0%}")
-    log(f"square {size:g} m, corner ({x0:.2f}, {y0:.2f})")
+    x1 = x0 + size if x1 is None else x1
+    y1 = y0 + size if y1 is None else y1
+    log(f"square {size:g} m: x {x0:.2f}..{x1:.2f}, y {y0:.2f}..{y1:.2f}")
 
-    las = read_square(src, x0, y0, size)
+    las = read_square(src, x0, x1, y0, y1)
     xyz = np.c_[las.x, las.y, las.z]                 # float64, scan coordinates
     log(f"{len(xyz):,} points in the square, z {xyz[:, 2].min():.1f}..{xyz[:, 2].max():.1f}")
 
@@ -546,7 +590,6 @@ def run(cfg: dict, encoder=None, out_dir: Path | None = None) -> dict:
 
     encoder = encoder or SonataEncoder(cfg["grid"])
     log("embedding")
-    feat = embed(encoder, vox, vcol, vnorm, cfg["tile"], cfg["margin"])
     extra = None
     if geom:
         log("12 geometric features, 20 NN (Liu et al. 2026)")
@@ -555,21 +598,72 @@ def run(cfg: dict, encoder=None, out_dir: Path | None = None) -> dict:
             log(f"  {name:17s} median {np.median(col):9.4f}  "
                 f"p5..p95 {np.percentile(col, 5):9.4f} .. {np.percentile(col, 95):9.4f}")
         extra = scale_block(g, cfg.get("geom_weight", 1.0))
-    dim = feat.shape[1] + (0 if extra is None else extra.shape[1])
-    log(f"clustering {nv:,} x {dim} into k={cfg['k']}")
-    labels = kmeans(feat, cfg["k"], cfg["seed"], extra)[inv]  # cell label -> every point
+    est_gb = nv * 1088 * 2 / 1e9
+    two_pass = est_gb > cfg.get("feat_gb", 8)
+    run_ = dict(tile=cfg["tile"], margin=cfg["margin"])
+    if not two_pass:
+        log(f"embedding ({est_gb:.1f} GB of embeddings, held in RAM)")
+        held = {}
 
-    stem = f"square_seed{cfg['seed']}_{size:g}m_k{cfg['k']}" + ("_geom" if geom else "")
+        def keep_all(cells, f):
+            if "f" not in held:
+                held["f"] = np.full((nv, f.shape[1]), np.nan, np.float16)
+            held["f"][cells] = f
+        width = embed(encoder, vox, vcol, vnorm, sink=keep_all, **run_)
+        feat = held.pop("f")
+        assert not np.isnan(feat).any(), "a cell got no embedding"
+        log(f"clustering {nv:,} x {width + (0 if extra is None else 12)} into k={cfg['k']}")
+        cell_lab = kmeans(feat, cfg["k"], cfg["seed"], extra)
+        del feat
+    else:
+        n_fit = min(nv, cfg.get("fit_cells", 500_000))
+        log(f"embedding: {est_gb:.0f} GB of embeddings will not be held, so two runs: "
+            f"1) fit k-means on {n_fit:,} random cells, 2) label every cell")
+        fit = np.sort(rng.choice(nv, n_fit, replace=False))
+        slot = np.full(nv, -1, np.int64)
+        slot[fit] = np.arange(n_fit)
+        held = {}
+
+        def keep_sample(cells, f):
+            if "f" not in held:
+                held["f"] = np.full((n_fit, f.shape[1]), np.nan, np.float16)
+            s_ = slot[cells]
+            held["f"][s_[s_ >= 0]] = f[s_ >= 0]
+        log("run 1 of 2: embeddings of the fitting sample")
+        width = embed(encoder, vox, vcol, vnorm, sink=keep_sample, **run_)
+        sample = held.pop("f")
+        assert not np.isnan(sample).any(), "a sampled cell got no embedding"
+        log(f"clustering {n_fit:,} x {width + (0 if extra is None else 12)} into k={cfg['k']}")
+        C = fit_kmeans(sample, cfg["k"], cfg["seed"],
+                       None if extra is None else extra[fit])
+        del sample
+        cell_lab = np.full(nv, -1, np.int64)
+
+        def label(cells, f):
+            cell_lab[cells] = assign_kmeans(f, C, None if extra is None else extra[cells])
+        log("run 2 of 2: every cell labelled against those centres")
+        embed(encoder, vox, vcol, vnorm, sink=label, **run_)
+        assert (cell_lab >= 0).all(), "a cell got no label"
+        cell_lab = by_size(cell_lab, cfg["k"])
+    dim = width + (0 if extra is None else extra.shape[1])
+    labels = cell_lab[inv]                            # cell label -> every point
+
+    tag = "bboxcentre" if cfg["center"] == "bbox" else f"seed{cfg['seed']}"
+    stem = f"square_{tag}_{size:g}m_k{cfg['k']}" + ("_geom" if geom else "")
     space = "Sonata + 12 geom" if geom else "Sonata space"
     write_scene(las, labels, cfg["k"], out_dir / f"{stem}.laz", space)
     title = (f"{'Sonata + 12 geometric features' if geom else 'Sonata embeddings'}"
              f" + k-means (k={cfg['k']}), {size:g} m square at "
-             f"({x0 + size / 2:.1f}, {y0 + size / 2:.1f}), {len(xyz):,} points")
+             f"({(x0 + x1) / 2:.1f}, {(y0 + y1) / 2:.1f}), {len(xyz):,} points")
     write_preview(xyz, labels, cfg["k"], title, out_dir / f"{stem}.png")
     meta = dict(source=str(src), seed=cfg["seed"], square_m=size,
-                corner=[x0, y0], center=[x0 + size / 2, y0 + size / 2],
+                corner=[x0, y0], center=[(x0 + x1) / 2, (y0 + y1) / 2],
+                bounds=dict(x=[x0, x1], y=[y0, y1]),
+                kmeans_fit=("every cell" if not two_pass else
+                            f"{min(nv, cfg.get('fit_cells', 500_000)):,} random cells, "
+                            "then every cell labelled in a second Sonata run"),
                 coverage=cover, points=int(len(xyz)), cells=nv, grid_m=cfg["grid"],
-                embedding_dim=int(feat.shape[1]), k=cfg["k"],
+                embedding_dim=int(width), k=cfg["k"],
                 features=cfg.get("features", "sonata"),
                 geom_features=list(GEOM_NAMES) if geom else None,
                 geom_weight=cfg.get("geom_weight", 1.0) if geom else None,

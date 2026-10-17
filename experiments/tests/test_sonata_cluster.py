@@ -155,6 +155,27 @@ def main() -> None:
               f"{v_ground:.2f}, ground planarity {p_ground:.2f}); same square reused; "
               f"blank Sonata + geom, k=4 purity {gagree:.1%}")
 
+        # a square too big to hold its embeddings: k-means fitted on a sample in
+        # a first Sonata run, every cell labelled in a second; same answer here
+        two = []
+        tmeta = cs.run(dict(cfg, feat_gb=1e-6, fit_cells=20_000),
+                       encoder=_stand_in(two), out_dir=d / "two")
+        tl = np.asarray(laspy.read(d / "two" / "square_seed7_15m_k2.laz").cluster)
+        assert len(two) == 2 * len(calls), (len(two), len(calls))
+        assert "second Sonata run" in tmeta["kmeans_fit"]
+        assert np.mean(tl == lab) > 0.999, np.mean(tl == lab)
+
+        # the notebooks' tile: centre of the header bounding box, centre -+ half
+        bmeta = cs.run(dict(cfg, center="bbox"), encoder=_stand_in([]), out_dir=d / "bbox")
+        c = (np.array(full.header.mins[:2]) + np.array(full.header.maxs[:2])) / 2
+        assert bmeta["bounds"] == dict(x=[c[0] - 7.5, c[0] + 7.5], y=[c[1] - 7.5, c[1] + 7.5])
+        bo = laspy.read(d / "bbox" / "square_bboxcentre_15m_k2.laz")
+        inb = ((full.x >= c[0] - 7.5) & (full.x < c[0] + 7.5) &
+               (full.y >= c[1] - 7.5) & (full.y < c[1] + 7.5))
+        assert len(bo.points) == inb.sum()
+        print(f"ok: two-run k-means ({len(two)} passes, sample of 20,000) agrees "
+              f"{np.mean(tl == lab):.2%}; bbox-centre tile exact, {inb.sum():,} pts")
+
 
 if __name__ == "__main__":
     main()

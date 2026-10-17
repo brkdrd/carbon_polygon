@@ -410,6 +410,32 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/sonata_cluster/cluster_square.py"]
 
+  # Bare Sonata + k-means on the tile the Sonata + SEGR notebooks used: 100 m,
+  # centred on the middle of the scan's bounding box. Its embeddings do not
+  # fit in RAM, so k-means is fitted on a 500k-cell sample and Sonata runs a
+  # second time to label every cell. Writes square_bboxcentre_100m_k8.*
+  sc_tile:
+    <<: *gpu
+    image: carbonpoly/sonata_cluster
+    env_file: [.env]
+    environment:
+      - DATA_DIR=/data
+      - RESULTS_DIR=/results
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - SC_CENTER=bbox
+      - SC_SQUARE=100
+      - SC_FEATURES=sonata
+      - SC_SEED=${SC_SEED:-0}
+      - SC_SOURCE
+      - SC_K
+      - SC_GRID
+      - SC_TILE
+      - SC_MARGIN
+      - SC_FEAT_GB
+      - SC_FIT_CELLS
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/sonata_cluster/cluster_square.py"]
+
   # Sonata embeddings + the 12 covariance features of Liu et al. 2026 (20 NN),
   # concatenated, on the SAME square as the newest sc_run result (SC_FROM
   # defaults to latest). Writes ..._geom.laz/.png/.json next to it.

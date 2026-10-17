@@ -11,6 +11,8 @@
 #   ./run_experiments.sh cluster    # Sonata embeddings + k-means on one random
 #                                   # square, coloured .laz in results/sonata_cluster
 #                                   # (SC_SEED=… SC_SQUARE=… SC_K=… to steer it)
+#   ./run_experiments.sh cluster_tile # bare Sonata + k-means on the Sonata+SEGR
+#                                   # notebooks' 100 m tile (bounding-box centre)
 #   ./run_experiments.sh cluster_geom # same square again, Sonata + the paper's
 #                                   # 12 covariance features concatenated
 #   ./run_experiments.sh geowalker  # GeoWalker: through-cloud distance field,
@@ -165,6 +167,7 @@ sc_build() { log "Building sonata_cluster image (on the sonata image)"
              $DC build sonata; $DC build sc_build; }
 sc_test()  { log "Sonata cluster — self-check, stand-in encoder (CPU, ~5 s)"; $RUN sc_test; }
 sc_run()   { log "Sonata cluster — random square, embeddings, k-means (GPU)"; $RUN sc_run; }
+sc_tile()  { log "Sonata cluster — the Sonata+SEGR 100 m tile, embeddings, k-means (GPU)"; $RUN sc_tile; }
 sc_geom()  { log "Sonata cluster — same square, Sonata + 12 geometric features (GPU)"; $RUN sc_geom; }
 gw_diag()  { log "GeoWalker — recall diagnostics"; $RUN geowalker_diag; }
 gw_height() { log "GeoWalker — canopy height vs the label criterion"; $RUN geowalker_height; }
@@ -236,11 +239,12 @@ case "${1:-all}" in
   sc_test) sc_build; sc_test ;;
   cluster) sc_build; sc_test; sc_run ;;
   cluster_geom) sc_build; sc_test; sc_geom ;;
+  cluster_tile) sc_build; sc_test; sc_tile ;;
   stemnet) stem_build; stem_test; stem_train; stem_infer; stem_patch ;;
   *) echo "usage: $0 [all|build|prep|sonata|exp1|exp2|exp3|exp4|\
 basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
 gw_diag|\
 gw_height|gw_head|\
-stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|cluster|cluster_geom|sc_test]"; exit 2 ;;
+stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|cluster|cluster_tile|cluster_geom|sc_test]"; exit 2 ;;
 esac
