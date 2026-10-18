@@ -32,6 +32,7 @@ GRID = float(os.environ.get("V2_GRID", "0.02"))
 GRID_DIR = OUT / f"grid{GRID:g}"
 FEAT_DIR = OUT / f"feat{GRID:g}"
 LAB_DIR = OUT / f"labels{GRID:g}"
+SEM_DIR = OUT / f"sem{GRID:g}"
 NORMAL_COLS = (8, 9, 10)                     # normal_x/y/z in the 12-feature tiles
 AUG_P, JIT_P = 0.6, 0.25
 PT_SIGMA, PT_CLIP = 0.02, 0.04
@@ -67,6 +68,9 @@ class TileStore:
                 if self.labels:
                     lb = np.load(LAB_DIR / name)
                     t.update(gate=lb["gate"].astype(np.int8), offset=lb["offset"].astype(np.float32))
+                    q = SEM_DIR / name
+                    t["sem"] = (np.load(q)["sem"].astype(np.int8) if q.exists()
+                                else np.full(len(t["xyz"]), -1, np.int8))
                 order = np.argsort(t["xyz"][:, 0], kind="stable")
                 t["order"], t["xs"] = order, t["xyz"][order, 0]
                 self.mem[ij] = t
@@ -77,7 +81,7 @@ class TileStore:
     def crop(self, cx, cy, size):
         """Every point in the square of edge `size` centred on (cx, cy)."""
         h = size / 2.0
-        out = {k: [] for k in ("xyz", "normal", "feat", "gate", "offset", "tile", "row")}
+        out = {k: [] for k in ("xyz", "normal", "feat", "gate", "offset", "sem", "tile", "row")}
         for a in range(int(np.floor((cx - h) / TILE)), int(np.floor((cx + h) / TILE)) + 1):
             for b in range(int(np.floor((cy - h) / TILE)), int(np.floor((cy + h) / TILE)) + 1):
                 t = self.tile((a, b))
@@ -93,6 +97,7 @@ class TileStore:
                     out[k].append(t[k][idx])
                 if self.labels:
                     out["gate"].append(t["gate"][idx]); out["offset"].append(t["offset"][idx])
+                    out["sem"].append(t["sem"][idx])
                 out["tile"].append(np.full(len(idx), a * 100000 + b, np.int64)); out["row"].append(idx)
         if not out["xyz"]:
             return None
@@ -114,13 +119,18 @@ class CacheStore:
     def tile(self, ij):
         if ij not in self.mem:
             d = self.dir / f"tile_{ij[0]}_{ij[1]}"
-            self.mem[ij] = ({a: np.load(d / f"{a}.npy", mmap_mode="r")
-                             for a in ("xyz", "feat", "gate", "offset", "cells")} if ij in self.have else None)
+            if ij in self.have:
+                t = {a: np.load(d / f"{a}.npy", mmap_mode="r") for a in ("xyz", "feat", "gate", "offset", "cells")}
+                t["sem"] = (np.load(d / "sem.npy", mmap_mode="r") if (d / "sem.npy").exists()
+                            else np.full(len(t["xyz"]), -1, np.int8))
+                self.mem[ij] = t
+            else:
+                self.mem[ij] = None
         return self.mem[ij]
 
     def crop(self, cx, cy, size):
         h, n = size / 2.0, self.n
-        out = {k: [] for k in ("xyz", "feat", "gate", "offset", "tile", "row")}
+        out = {k: [] for k in ("xyz", "feat", "gate", "offset", "sem", "tile", "row")}
         for a in range(int(np.floor((cx - h) / TILE)), int(np.floor((cx + h) / TILE)) + 1):
             for b in range(int(np.floor((cy - h) / TILE)), int(np.floor((cy + h) / TILE)) + 1):
                 t = self.tile((a, b))
@@ -141,6 +151,7 @@ class CacheStore:
                     out["feat"].append(np.asarray(t["feat"][lo:hi])[k])
                     out["gate"].append(np.asarray(t["gate"][lo:hi])[k])
                     out["offset"].append(np.asarray(t["offset"][lo:hi])[k])
+                    out["sem"].append(np.asarray(t["sem"][lo:hi])[k])
                     out["tile"].append(np.full(len(k), a * 100000 + b, np.int64))
         if not out["xyz"]:
             return None

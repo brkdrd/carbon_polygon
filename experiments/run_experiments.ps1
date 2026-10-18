@@ -215,6 +215,8 @@ function V2Export  { Log "StemNet v2 - export scan columns around 80 survey poin
     Invoke-Stage "v2_export" }
 function V2Splits  { Log "StemNet v2 - prep part 4: train/val/test regions (CPU)"
     Invoke-Stage "v2_splits" }
+function V2Semantic { Log "StemNet v2 - prep part 5b: tree / non-tree labels from campus_pred_B24 (CPU, skips if current)"
+    Invoke-Stage "v2_semantic" }
 function V2Cache   { Log "StemNet v2 - prep part 6: sorted training cache (CPU, ~10 min, skips if current)"
     Invoke-Stage "v2_cache" }
 function V2TrainBuild { Log "Building stemnet_v2 GPU image (on the sonata image)"
@@ -226,6 +228,8 @@ function V2Train   { Log "StemNet v2 - train to 50,000 steps, val every 5,000 (G
     Invoke-Stage "v2_train" }
 function V2View    { Log "StemNet v2 - look at the points in squares across the campus (CPU)"
     Invoke-Stage "v2_view" }
+function V2TrainTree { Log "StemNet v2 - train gate/offset + tree/non-tree, val every 5,000 (GPU)"
+    Invoke-Stage "v2_train_tree" }
 function V2Segment { Log "StemNet v2 - probe: frozen Sonata +/- features, k-means, no labels (GPU)"
     Invoke-Stage "v2_segment" }
 function ScBuild { Log "Building sonata_cluster image (on the sonata image)"
@@ -311,6 +315,8 @@ switch ($Target) {
     "cluster_geom" { ScBuild; ScTest; ScGeom }
     "cluster_tile" { ScBuild; ScTest; ScTile }
     "v2_view" { V2Build; V2View }
+    "v2_semantic" { V2Build; V2Semantic }
+    "v2_train_tree" { V2Build; V2Test; V2Semantic; V2Cache; V2TrainBuild; V2TrainTest; V2TrainTree }
     "stemnet" { StemBuild; StemTest; StemTrain; StemInfer; StemPatch }
     "gw_diag" { GwBuild; GwDiag }
     "gw_height" { GwBuild; GwHeight }

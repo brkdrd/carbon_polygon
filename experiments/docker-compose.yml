@@ -259,7 +259,7 @@ services:
   v2_test:
     image: carbonpoly/stemnet_v2
     environment: { DATA_DIR: /tmp/data, RESULTS_DIR: /tmp/results }
-    command: ["sh", "-c", "python /app/tests/test_stemnet_v2_measure.py && python /app/tests/test_stemnet_v2_grid.py && python /app/tests/test_stemnet_v2_features.py && python /app/tests/test_stemnet_v2_bases.py && python /app/tests/test_stemnet_v2_splits.py && python /app/tests/test_stemnet_v2_export.py && python /app/tests/test_stemnet_v2_labels.py"]
+    command: ["sh", "-c", "python /app/tests/test_stemnet_v2_measure.py && python /app/tests/test_stemnet_v2_grid.py && python /app/tests/test_stemnet_v2_features.py && python /app/tests/test_stemnet_v2_bases.py && python /app/tests/test_stemnet_v2_splits.py && python /app/tests/test_stemnet_v2_export.py && python /app/tests/test_stemnet_v2_labels.py && python /app/tests/test_stemnet_v2_semantic.py"]
 
   # Prep part 1: the raw scan on Sonata's 0.02 m grid, one real point per voxel,
   # colour kept, coordinates in the shared frame. CPU only. Scratch space up to
@@ -306,6 +306,16 @@ services:
     environment: { DATA_DIR: /data, RESULTS_DIR: /results }
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/prep_labels.py"]
+
+  # Prep part 5b: tree / non-tree labels per grid point, carried over from
+  # data/raw/campus_pred_B24.laz (ground-removed, height above ground). CPU,
+  # tens of minutes. Skips itself when already up to date.
+  v2_semantic:
+    image: carbonpoly/stemnet_v2
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/prep_semantic.py"]
 
   # Prep part 6: the training cache — train/val tiles sorted into 1 m cells
   # so a crop reads only its own points. CPU, ~10 min, ~20 GB. Skips itself
@@ -356,6 +366,18 @@ services:
     image: carbonpoly/stemnet_v2_gpu
     env_file: [.env]
     environment: { DATA_DIR: /data, RESULTS_DIR: /results,
+                     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/train.py"]
+
+  # TreeLearn-style run: the same head plus a tree / non-tree output trained
+  # on the campus_pred_B24 labels. Own checkpoints (head_tree_*.pth) and log
+  # (stemnet_v2_train_tree.txt); resumes from head_tree_last.pth.
+  v2_train_tree:
+    <<: *gpu
+    image: carbonpoly/stemnet_v2_gpu
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results, V2_TASK: base+tree,
                      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/train.py"]

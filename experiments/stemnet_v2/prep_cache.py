@@ -14,6 +14,7 @@ a column by row), one plain .npy per array so it can be read in place:
   feat    float16 (N, 12)   inf saturated at the float16 maximum (65,504)
   gate    int8 (N,)
   offset  float16 (N, 2)
+  sem     int8 (N,)         tree / non-tree labels (prep_semantic.py), when present
   cells   int64 (626,)      cells[c] = first row of 1 m cell c = col * 25 + row
 An 8 m crop is then 9 contiguous slices per tile. Same values as the source
 tiles, reordered; nothing is recomputed.
@@ -39,6 +40,7 @@ GRID = float(os.environ.get("V2_GRID", "0.02"))
 GRID_DIR = OUT / f"grid{GRID:g}"
 FEAT_DIR = OUT / f"feat{GRID:g}"
 LAB_DIR = OUT / f"labels{GRID:g}"
+SEM_DIR = OUT / f"sem{GRID:g}"
 CACHE_DIR = OUT / f"cache{GRID:g}"
 FRAME_JSON = OUT / "frame.json"
 GROW_M = 5
@@ -54,7 +56,10 @@ def ncell():
 
 
 def stamp_of(frame):
-    return json.dumps(dict(labels=frame.get("labels"), features=frame.get("features"), tile=TILE), sort_keys=True)
+    d = dict(labels=frame.get("labels"), features=frame.get("features"), tile=TILE)
+    if frame.get("semantic"):
+        d["semantic"] = frame["semantic"].get("stamp")
+    return json.dumps(d, sort_keys=True)
 
 
 def needed_tiles(split):
@@ -95,6 +100,8 @@ def main():
         shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
     t0, n_pts, n_bytes, n_inf = time.time(), 0, 0, 0
+    with_sem = bool(frame.get("semantic")) and SEM_DIR.exists()
+    log("tree / non-tree labels: " + ("included" if with_sem else "none (run v2_semantic to add them)"))
     for k, (i, j) in enumerate(tiles):
         name = f"tile_{i}_{j}"
         xyz = np.load(GRID_DIR / f"{name}.npz")["xyz"].astype(np.float32)
@@ -111,6 +118,11 @@ def main():
         d.mkdir()
         arrays = dict(xyz=xyz[order], feat=feat[order], gate=lb["gate"].astype(np.int8)[order],
                       offset=lb["offset"].astype(np.float16)[order], cells=cells)
+        if with_sem:
+            sem = np.load(SEM_DIR / f"{name}.npz")["sem"]
+            if len(sem) != len(xyz):
+                raise SystemExit(f"[v2-cache] {name}: sem {len(sem)} rows vs grid {len(xyz)} — rerun v2_semantic")
+            arrays["sem"] = sem.astype(np.int8)[order]
         for a, v in arrays.items():
             np.save(d / f"{a}.npy", np.ascontiguousarray(v))
             n_bytes += v.nbytes
@@ -121,7 +133,7 @@ def main():
                 f"{el / 60:.1f} min, eta {el / (k + 1) * (len(tiles) - k - 1) / 60:.1f} min")
     tmp.rename(CACHE_DIR)
     frame = json.loads(FRAME_JSON.read_text())
-    frame["cache"] = dict(dir=CACHE_DIR.name, stamp=stamp, tiles=len(tiles), points=n_pts,
+    frame["cache"] = dict(dir=CACHE_DIR.name, stamp=stamp, tiles=len(tiles), points=n_pts, sem=with_sem,
                           gb=round(n_bytes / 2**30, 2), feature_values_saturated=n_inf)
     FRAME_JSON.write_text(json.dumps(frame, indent=2))
     log(f"-> {CACHE_DIR} | {len(tiles)} tiles, {n_pts:,} points, {n_bytes / 2**30:.1f} GB | "

@@ -104,9 +104,11 @@ def match(det, score, gt, radius, bbox=None):
                 rmse=float(np.sqrt(np.mean(np.square(err)))) if err else float("nan"), pair=pair)
 
 
-def predict_region(predict_crop, store, bbox, cap, rng):
+def predict_region(predict_crop, store, bbox, cap, rng, full=False):
     """Mean predictions for every point in bbox covered by an inner square.
-    predict_crop(crop) -> (p (n,), off (n, 2)). Returns xy, p, off.
+    predict_crop(crop) -> (p (n,), off (n, 2)[, tree (n,)]). Returns xy, p, off;
+    with full=True a dict that also carries z, the mean tree probability (when
+    predict_crop gives one) and the points' tree / non-tree labels (sem).
 
     Accumulates into one slot per tile point (sum of p, of offsets, count), so
     a region of tens of millions of points costs ~13 bytes per point and no
@@ -123,22 +125,38 @@ def predict_region(predict_crop, store, bbox, cap, rng):
             if len(c["xyz"]) > cap:
                 sel = rng.choice(len(c["xyz"]), cap, replace=False)
                 c = {k: v[sel] for k, v in c.items()}
-            p, off = predict_crop(c)
+            out = predict_crop(c)
+            p, off = out[0], out[1]
+            pt = out[2] if len(out) > 2 else None
             inner = (np.abs(c["xyz"][:, 0] - cx) <= INNER / 2) & (np.abs(c["xyz"][:, 1] - cy) <= INNER / 2)
             for t in np.unique(c["tile"][inner]):
                 m = inner & (c["tile"] == t)
                 if t not in acc:
                     n = len(store.tile((int(t) // 100000, int(t) % 100000))["xyz"])
-                    acc[t] = [np.zeros(n, np.float32), np.zeros((n, 2), np.float32), np.zeros(n, np.uint16)]
+                    acc[t] = [np.zeros(n, np.float32), np.zeros((n, 2), np.float32), np.zeros(n, np.uint16),
+                              np.zeros(n, np.float32) if pt is not None else None]
                 r = c["row"][m]                      # unique within one crop
                 acc[t][0][r] += p[m]; acc[t][1][r] += off[m]; acc[t][2][r] += 1
-    XY, P, O = [], [], []
-    for t, (sp, so, n) in acc.items():
+                if pt is not None:
+                    acc[t][3][r] += pt[m]
+    XY, Z, P, O, PT, SEM = [], [], [], [], [], []
+    for t, (sp, so, n, spt) in acc.items():
         k = n > 0
-        xyz = store.tile((int(t) // 100000, int(t) % 100000))["xyz"]
+        tile = store.tile((int(t) // 100000, int(t) % 100000))
+        xyz = tile["xyz"]
         XY.append(xyz[k, :2]); P.append(sp[k] / n[k]); O.append(so[k] / n[k, None])
+        if full:
+            Z.append(np.asarray(xyz[k, 2], np.float32))
+            PT.append(spt[k] / n[k] if spt is not None else np.full(int(k.sum()), np.nan, np.float32))
+            SEM.append(np.asarray(tile["sem"])[k] if "sem" in tile else np.full(int(k.sum()), -1, np.int8))
     if not XY:
+        if full:
+            return dict(xy=np.zeros((0, 2)), z=np.zeros(0), p=np.zeros(0), off=np.zeros((0, 2)),
+                        tree=np.zeros(0), sem=np.zeros(0, np.int8))
         return np.zeros((0, 2)), np.zeros(0), np.zeros((0, 2))
     xy, p, off = np.concatenate(XY), np.concatenate(P), np.concatenate(O)
     inb = (xy[:, 0] >= x0) & (xy[:, 0] <= x1) & (xy[:, 1] >= y0) & (xy[:, 1] <= y1)
+    if full:
+        return dict(xy=xy[inb], z=np.concatenate(Z)[inb], p=p[inb], off=off[inb],
+                    tree=np.concatenate(PT)[inb], sem=np.concatenate(SEM)[inb])
     return xy[inb], p[inb], off[inb]

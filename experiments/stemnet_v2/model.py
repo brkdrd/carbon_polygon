@@ -14,6 +14,8 @@ The head sees those 1,232 values plus the 12 covariance features
   gate    a logit for "close to a tree base"
   offset  the 2-D vector to that base, zero-initialised so an untrained head
           votes for the point itself rather than somewhere random
+  tree    (Head(..., tree=True) only) a logit for "this point is tree", the
+          semantic output TreeLearn trains beside its offsets
 """
 from __future__ import annotations
 
@@ -83,16 +85,19 @@ def to_local(xyz):
 
 
 class Head(nn.Module):
-    def __init__(self, d_in, d=256):
+    def __init__(self, d_in, d=256, tree=False):
         super().__init__()
-        self.d_in = d_in
+        self.d_in, self.has_tree = d_in, tree
         self.trunk = nn.Sequential(nn.LayerNorm(d_in), nn.Linear(d_in, d), nn.GELU(),
                                    nn.Linear(d, d), nn.GELU())
         self.gate = nn.Linear(d, 1)
         self.off = nn.Linear(d, 2)
         nn.init.zeros_(self.off.weight)
         nn.init.zeros_(self.off.bias)
+        self.tree = nn.Linear(d, 1) if tree else None
 
     def forward(self, x):
         h = self.trunk(x)
-        return self.gate(h)[:, 0], self.off(h)
+        if self.tree is None:
+            return self.gate(h)[:, 0], self.off(h)
+        return self.gate(h)[:, 0], self.off(h), self.tree(h)[:, 0]

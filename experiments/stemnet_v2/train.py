@@ -35,11 +35,22 @@ is not finite falls back to the best one. (Run 1 lost everything after step
 The progress line splits each step's time into data (tiles, crop,
 augmentation), encoder (Sonata) and head (forward + backward).
 
-Outputs:
-  data/stemnet_v2/models/head_best.pth, head_last.pth
+V2_TASK=base+tree (the v2_train_tree target) adds TreeLearn's semantic half:
+a third output, "is this point tree", trained with plain binary cross-entropy
+on the tree / non-tree labels carried over from campus_pred_B24
+(prep_semantic.py: target = tree, loss only where the label is known),
+x V2_LAMBDA_TREE, beside the gate and offset. Evaluation adds accuracy, IoU
+per class and mIoU on the val square, for all labelled points and for the
+points whose label came from a matched point (i.e. without the removed
+ground). Its own checkpoints and log (head_tree_*.pth,
+stemnet_v2_train_tree.txt); the best F1 and the best mIoU are both kept.
+
+Outputs (V2_TASK=base+tree: head_tree_*, *_tree.txt / .csv, 46_..._tree.png):
+  data/stemnet_v2/models/head_best.pth, head_last.pth (+ head_tree_best_miou.pth)
   results/stemnet_v2_train.txt          progress, losses, every evaluation
   results/stemnet_v2_val_detections.csv
   results/46_stemnet_v2_val.png
+  results/51_stemnet_v2_val_tree.png    (tree task) val square: tree right / wrong
 """
 from __future__ import annotations
 
@@ -73,10 +84,17 @@ ENCODER = os.environ.get("V2_ENCODER", "sonata")
 RESUME = os.environ.get("V2_RESUME", "1") != "0"
 PROGRESS_S = float(os.environ.get("V2_PROGRESS_S", "60"))
 SEED = int(os.environ.get("V2_SEED", "0"))
+TASK = os.environ.get("V2_TASK", "base")
+if TASK not in ("base", "base+tree"):
+    raise SystemExit(f"[v2-train] V2_TASK={TASK!r}: use base or base+tree")
+TREE = TASK == "base+tree"
+LAMBDA_TREE = float(os.environ.get("V2_LAMBDA_TREE", "1.0"))
 CROP, INNER = 8.0, 6.0
 MODELS = OUT / "models"
-BEST, LAST = MODELS / "head_best.pth", MODELS / "head_last.pth"
-LOG = RESULTS / "stemnet_v2_train.txt"
+SUF = "_tree" if TREE else ""
+BEST, LAST = MODELS / f"head{SUF}_best.pth", MODELS / f"head{SUF}_last.pth"
+BEST_MIOU = MODELS / "head_tree_best_miou.pth"
+LOG = RESULTS / f"stemnet_v2_train{SUF}.txt"
 
 
 def log(msg):
@@ -125,9 +143,12 @@ class Runner:
     @torch.no_grad()
     def predict(self, c):
         self.head.eval()
-        g, o = self.head(self.inputs(c))
+        out = self.head(self.inputs(c))
         self.head.train()
-        return torch.sigmoid(g).cpu().numpy(), o.cpu().numpy()
+        res = (torch.sigmoid(out[0]).cpu().numpy(), out[1].cpu().numpy())
+        if len(out) > 2:
+            res += (torch.sigmoid(out[2]).cpu().numpy(),)
+        return res
 
 
 def finite(head):
@@ -135,7 +156,8 @@ def finite(head):
 
 
 def crop_loss(runner, c, inner, x):
-    g, o = runner.head(x)
+    out = runner.head(x)
+    g, o = out[0], out[1]
     m = torch.from_numpy(inner).to(runner.dev)
     y = torch.from_numpy(c["gate"].astype(np.float32)).to(runner.dev)[m]
     g = g[m]
@@ -147,15 +169,43 @@ def crop_loss(runner, c, inner, x):
         l_off = torch.linalg.vector_norm(o[m][y > 0.5] - t, dim=1).mean()
     else:
         l_off = o.sum() * 0.0
-    return l_gate, l_off, n_pos, len(y)
+    tr = None
+    if len(out) > 2:
+        s_ = torch.from_numpy(c["sem"].astype(np.int64)).to(runner.dev)[m]
+        k = s_ >= 0
+        tl = out[2][m][k]
+        if int(k.sum()):
+            yt = (s_[k] == 1).float()
+            l_tree = F.binary_cross_entropy_with_logits(tl, yt)
+            acc = float(((tl > 0).float() == yt).float().mean())
+        else:
+            l_tree, acc = out[2].sum() * 0.0, float("nan")
+        tr = dict(loss=l_tree, acc=acc, labelled=int(k.sum()), tree=int((s_ == 1).sum()))
+    return l_gate, l_off, n_pos, len(y), tr
+
+
+def tree_metrics(pt, sem):
+    """Tree probability vs labels: accuracy, IoU per class, mIoU, P / R of tree."""
+    k = sem >= 0
+    pred, y = pt[k] >= 0.5, sem[k] == 1
+    tp = int((pred & y).sum()); fp = int((pred & ~y).sum()); fn = int((~pred & y).sum()); tn = int((~pred & ~y).sum())
+    iou_t = tp / max(tp + fp + fn, 1); iou_n = tn / max(tn + fp + fn, 1)
+    return dict(points=int(k.sum()), acc=(tp + tn) / max(k.sum(), 1), iou_tree=iou_t, iou_non=iou_n,
+                miou=(iou_t + iou_n) / 2, precision=tp / max(tp + fp, 1), recall=tp / max(tp + fn, 1),
+                tree_share=float(y.mean()) if k.any() else 0.0)
 
 
 def evaluate(runner, store, gt, tier, bbox, rng):
     t0 = time.time()
-    xy, p, off = V.predict_region(runner.predict, store, bbox, CAP, rng)
+    R = V.predict_region(runner.predict, store, bbox, CAP, rng, full=True)
+    xy, p, off = R["xy"], R["p"], R["off"]
     det, score, nv = V.detect(xy, p, off)
     out = dict(points=int(len(xy)), gated=float((p >= V.P_THRESH).mean()) if len(p) else 0.0,
                detections=int(len(det)), gt=int(len(gt)), seconds=time.time() - t0)
+    if TREE:
+        out["tree"] = tree_metrics(R["tree"], R["sem"])
+        out["tree_matched"] = tree_metrics(R["tree"], np.where(R["sem"] == 2, -1, R["sem"]))
+        out["_region"] = R
     for r in (0.5, 0.3):
         mm = V.match(det, score, gt, r, bbox)
         found = np.zeros(len(gt), bool); found[mm["pair"][mm["pair"] >= 0]] = True
@@ -173,17 +223,24 @@ def report_eval(step, ev):
         f"(P {b['precision']:.3f} R {b['recall']:.3f}) | {ev['detections']} det / {ev['gt']} bases | "
         f"recall@0.5 by tier " + " ".join(f"{t} {v:.2f}" for t, v in a["recall_by_tier"].items())
         + f" | {ev['gated'] * 100:.1f}% of {ev['points']:,} points gated | {ev['seconds'] / 60:.1f} min")
+    for k, nm in (("tree", "all labelled"), ("tree_matched", "matched only (no removed ground)")):
+        if k in ev:
+            t = ev[k]
+            log(f"  TREE {nm}: mIoU {t['miou']:.3f} (IoU tree {t['iou_tree']:.3f}, non-tree {t['iou_non']:.3f}) | "
+                f"acc {t['acc']:.3f} | tree P {t['precision']:.3f} R {t['recall']:.3f} | "
+                f"{t['points']:,} pts, {t['tree_share'] * 100:.1f}% tree")
 
 
-def save(path, head, opt, step, best, mu, sd, ev):
+def save(path, head, opt, step, best, mu, sd, ev, best_miou=-1.0):
     if not finite(head):
         log(f"  NOT saving {path.name} at step {step}: weights are not finite")
         return
     MODELS.mkdir(parents=True, exist_ok=True)
-    torch.save(dict(head=head.state_dict(), opt=opt.state_dict(), step=step, best=best, mu=mu, sd=sd,
-                    d_in=head.d_in, eval={k: v for k, v in (ev or {}).items() if not k.startswith("_")},
+    torch.save(dict(head=head.state_dict(), opt=opt.state_dict(), step=step, best=best, best_miou=best_miou,
+                    mu=mu, sd=sd, d_in=head.d_in, task=TASK,
+                    eval={k: v for k, v in (ev or {}).items() if not k.startswith("_")},
                     cfg=dict(crop=CROP, inner=INNER, cap=CAP, lr=LR, steps=STEPS, accum=ACCUM,
-                             encoder=ENCODER, colour="zeros")), path)
+                             encoder=ENCODER, colour="zeros", task=TASK, lambda_tree=LAMBDA_TREE)), path)
 
 
 def figure(gt, det, pair, bbox, path):
@@ -199,6 +256,34 @@ def figure(gt, det, pair, bbox, path):
     ax.scatter(det[pair == -1, 0], det[pair == -1, 1], s=12, c="tab:red", marker="x", label="detection, false")
     ax.set_xlim(bbox[0], bbox[1]); ax.set_ylim(bbox[2], bbox[3]); ax.set_aspect("equal")
     ax.legend(loc="upper right"); ax.set_title("StemNet v2 on the val square, match 0.5 m")
+    fig.tight_layout(); fig.savefig(path, dpi=110); plt.close(fig)
+
+
+def tree_figure(R, bbox, step, t, path, px=0.1):
+    """Val square from above: per pixel, the highest point's outcome."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    x0, x1, y0, y1 = bbox
+    nx, ny = int(np.ceil((x1 - x0) / px)), int(np.ceil((y1 - y0) / px))
+    i = np.clip(((R["xy"][:, 0] - x0) / px).astype(np.int64), 0, nx - 1)
+    j = np.clip(((R["xy"][:, 1] - y0) / px).astype(np.int64), 0, ny - 1)
+    pred, sem = R["tree"] >= 0.5, R["sem"]
+    cls = np.full(len(sem), 4)                                   # 0 TP 1 TN 2 FP 3 FN 4 unlabelled
+    lab = sem >= 0; y = sem == 1
+    cls[lab & pred & y] = 0; cls[lab & ~pred & ~y] = 1; cls[lab & pred & ~y] = 2; cls[lab & ~pred & y] = 3
+    key = j * nx + i
+    o = np.lexsort((R["z"], key))
+    last = np.r_[key[o][1:] != key[o][:-1], True]
+    pal = np.array([[0.13, 0.55, 0.13], [0.75, 0.75, 0.75], [0.85, 0.1, 0.1], [0.1, 0.3, 0.9], [0.95, 0.85, 0.3]])
+    img = np.ones((ny * nx, 3)); img[key[o][last]] = pal[cls[o][last]]
+    fig, ax = plt.subplots(figsize=(11, 11))
+    ax.imshow(img.reshape(ny, nx, 3), origin="lower", extent=(x0, x1, y0, y1), interpolation="nearest")
+    from matplotlib.patches import Patch
+    ax.legend(handles=[Patch(color=c, label=l) for c, l in zip(pal, ("tree, right", "non-tree, right",
+              "said tree, is non-tree", "said non-tree, is tree", "no label"))], loc="upper right")
+    ax.set_title(f"Val square from above (highest point per {px * 100:g} cm pixel), step {step}: "
+                 f"mIoU {t['miou']:.3f}, acc {t['acc']:.3f}")
     fig.tight_layout(); fig.savefig(path, dpi=110); plt.close(fig)
 
 
@@ -219,8 +304,18 @@ def main():
     gt, tier, bbox = val_truth(regions)
     log(f"{len(centres):,} training crop positions | val square {bbox} with {len(gt)} bases | device {dev}")
 
+    if TREE:
+        have = 0
+        for c_ in centres[rng.choice(len(centres), min(20, len(centres)), replace=False)]:
+            cr = store.crop(c_[0], c_[1], CROP)
+            have += int((cr["sem"] >= 0).sum()) if cr is not None else 0
+        if not have:
+            raise SystemExit("[v2-train] V2_TASK=base+tree but the crops carry no tree / non-tree labels — "
+                             "run v2_semantic, then v2_cache")
+        log(f"task base+tree: tree loss x {LAMBDA_TREE:g} | train-split labels: "
+            f"{json.dumps(frame.get('semantic', {}).get('tally', {}).get('train', {}))}")
     enc = M.load_sonata(dev) if ENCODER == "sonata" else M.FakeEncoder()
-    start, best, mu, sd = 0, -1.0, None, None
+    start, best, best_miou, mu, sd = 0, -1.0, -1.0, None, None
     ck = None
     for path in ((LAST, BEST) if RESUME else ()):
         if path.exists():
@@ -237,11 +332,11 @@ def main():
     probe = {k: v[:20000] for k, v in probe.items()}
     d_in = Runner(enc, None, mu, sd, dev).inputs(probe).shape[1]   # 1,232 Sonata + 12 covariance
     log(f"head input: {d_in} values per point")
-    head = M.Head(d_in).to(dev)
+    head = M.Head(d_in, tree=TREE).to(dev)
     opt = torch.optim.AdamW(head.parameters(), lr=LR, weight_decay=WD)
     if ck is not None:
         head.load_state_dict(ck["head"]); opt.load_state_dict(ck["opt"])
-        start, best = int(ck["step"]), float(ck["best"])
+        start, best, best_miou = int(ck["step"]), float(ck["best"]), float(ck.get("best_miou", -1.0))
         log(f"resuming from step {start} (best F1@0.5 so far {best:.3f})")
         if any(torch.is_tensor(v) and not bool(torch.isfinite(v).all())
                for st in opt.state.values() for v in st.values()):
@@ -260,7 +355,7 @@ def main():
     skipped_crops = skipped_steps = 0
     for step in range(start + 1, STEPS + 1):
         opt.zero_grad(set_to_none=True)
-        lg_s = lo_s = 0.0; npos = npts = 0; used = 0
+        lg_s = lo_s = lt_s = 0.0; npos = npts = 0; used = 0; t_acc = []
         t_data = t_enc = t_head = 0.0
         for _ in range(ACCUM):
             ta = time.time()
@@ -280,17 +375,20 @@ def main():
             t_data += tb - ta; t_enc += tc - tb
             bad = "inputs" if not bool(torch.isfinite(x).all()) else None
             if bad is None:
-                lg, lo, p_, n_ = crop_loss(runner, c, inner, x)
-                if not (bool(torch.isfinite(lg)) and bool(torch.isfinite(lo))):
+                lg, lo, p_, n_, tr = crop_loss(runner, c, inner, x)
+                lt = tr["loss"] if tr is not None else lg * 0.0
+                if not (bool(torch.isfinite(lg)) and bool(torch.isfinite(lo)) and bool(torch.isfinite(lt))):
                     bad = "loss"
             if bad is not None:
                 skipped_crops += 1
                 if skipped_crops <= 50:
                     log(f"  skipped crop at ({cx:.1f}, {cy:.1f}), step {step}: non-finite {bad}")
                 continue
-            ((lg + LAMBDA_OFF * lo) / ACCUM).backward()
+            ((lg + LAMBDA_OFF * lo + LAMBDA_TREE * lt) / ACCUM).backward()
             sync(); t_head += time.time() - tc
-            lg_s += float(lg); lo_s += float(lo); npos += p_; npts += n_; used += 1
+            lg_s += float(lg); lo_s += float(lo); lt_s += float(lt); npos += p_; npts += n_; used += 1
+            if tr is not None and np.isfinite(tr["acc"]):
+                t_acc.append(tr["acc"])
         gn = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0) if used else torch.tensor(0.0)
         if used and bool(torch.isfinite(gn)):
             opt.step()
@@ -300,14 +398,17 @@ def main():
         sched.step()
         tm = dict(data=t_data, enc=t_enc, head=t_head)
         for k, v in (("gate", lg_s / max(used, 1)), ("off", lo_s / max(used, 1)), ("pos", npos / max(npts, 1)),
-                     ("pts", npts / max(used, 1)), *tm.items()):
+                     ("pts", npts / max(used, 1)), ("tree", lt_s / max(used, 1)),
+                     ("tacc", float(np.mean(t_acc)) if t_acc else 0.0), *tm.items()):
             run[k] = v if k not in run else 0.95 * run[k] + 0.05 * v
         if time.time() - last > PROGRESS_S or step == start + 1:
             last = time.time()
             rate = (time.time() - t0) / max(step - start, 1)
             mem = (f" | gpu peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GB"
                    if dev.startswith("cuda") else "")
-            log(f"step {step}/{STEPS} | gate {run['gate']:.4f} off {run['off'] * 100:.1f} cm | close {run['pos'] * 100:.2f}% "
+            log(f"step {step}/{STEPS} | gate {run['gate']:.4f} off {run['off'] * 100:.1f} cm"
+                + (f" | tree {run['tree']:.4f} acc {run['tacc']:.3f}" if TREE else "")
+                + f" | close {run['pos'] * 100:.2f}% "
                 f"of {run['pts']:,.0f} inner pts | lr {sched.get_last_lr()[0]:.2e} | {rate:.2f} s/step "
                 f"(data {run['data']:.2f} encoder {run['enc']:.2f} head {run['head']:.2f}), "
                 f"eta {rate * (STEPS - step) / 3600:.1f} h{mem}"
@@ -315,19 +416,26 @@ def main():
         if step % EVAL_EVERY == 0 or step == STEPS:
             ev, det, score, nv = evaluate(runner, store, gt, tier, bbox, rng)
             report_eval(step, ev)
+            if TREE and ev["tree"]["miou"] > best_miou:
+                best_miou = ev["tree"]["miou"]
+                save(BEST_MIOU, head, opt, step, best, mu, sd, ev, best_miou)
+                log(f"  new best tree mIoU -> {BEST_MIOU}")
+                tree_figure(ev["_region"], bbox, step, ev["tree"], RESULTS / "51_stemnet_v2_val_tree.png")
+            ev.pop("_region", None)
             if ev["@0.5"]["f1"] > best:
                 best = ev["@0.5"]["f1"]
-                save(BEST, head, opt, step, best, mu, sd, ev)
+                save(BEST, head, opt, step, best, mu, sd, ev, best_miou)
                 log(f"  new best -> {BEST}")
-                with open(RESULTS / "stemnet_v2_val_detections.csv", "w", newline="") as f:
+                with open(RESULTS / f"stemnet_v2_val_detections{SUF}.csv", "w", newline="") as f:
                     w = csv.writer(f); w.writerow(["x", "y", "score", "votes", "matched_base"])
                     for (x, y), s_, n_, pr in zip(det, score, nv, ev["_pair"]):
                         w.writerow([f"{x:.3f}", f"{y:.3f}", f"{s_:.2f}", int(n_), int(pr)])
-                figure(gt, det, ev["_pair"], bbox, RESULTS / "46_stemnet_v2_val.png")
-            save(LAST, head, opt, step, best, mu, sd, ev)
+                figure(gt, det, ev["_pair"], bbox, RESULTS / f"46_stemnet_v2_val{SUF}.png")
+            save(LAST, head, opt, step, best, mu, sd, ev, best_miou)
         elif step % 1000 == 0:                       # a crash loses at most 1,000 steps
-            save(LAST, head, opt, step, best, mu, sd, ev)
-    log(f"done: {STEPS} steps in {(time.time() - t0) / 3600:.1f} h | best val F1@0.5 {best:.3f} -> {BEST}")
+            save(LAST, head, opt, step, best, mu, sd, ev, best_miou)
+    log(f"done: {STEPS} steps in {(time.time() - t0) / 3600:.1f} h | best val F1@0.5 {best:.3f} -> {BEST}"
+        + (f" | best tree mIoU {best_miou:.3f} -> {BEST_MIOU}" if TREE else ""))
 
 
 if __name__ == "__main__":

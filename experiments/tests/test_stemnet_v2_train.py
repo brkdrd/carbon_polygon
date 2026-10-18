@@ -106,7 +106,7 @@ def test_cache_crops_equal_tile_crops():
                 assert cb is None; continue
             oa = np.lexsort(ca["xyz"].T); ob = np.lexsort(cb["xyz"].T)
             assert len(oa) == len(ob), (cx, cy, len(oa), len(ob))
-            for k in ("xyz", "feat", "gate", "offset", "normal", "tile"):
+            for k in ("xyz", "feat", "gate", "offset", "sem", "normal", "tile"):
                 assert np.array_equal(ca[k][oa], cb[k][ob]), (cx, cy, k)
             t_ = cb["tile"][0]
             xyz = b.tile((int(t_) // 100000, int(t_) % 100000))["xyz"]
@@ -180,6 +180,60 @@ def test_training_runs_evaluates_saves_and_resumes():
         assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
         assert "head_last.pth (step 18) has non-finite weights" in r.stdout, r.stdout[-1500:]
         assert f"resuming from step {best_step}" in r.stdout, r.stdout[-1500:]
+
+
+def _add_sem(t, pos, rad):
+    """Tree / non-tree labels as prep_semantic writes them: trunk = 1, ground = 2."""
+    d = Path(t) / "data" / "stemnet_v2"
+    (d / "sem0.02").mkdir()
+    for q in sorted((d / "grid0.02").glob("tile_*.npz")):
+        xyz = np.load(q)["xyz"]
+        r = np.hypot(xyz[:, None, 0] - pos[None, :, 0], xyz[:, None, 1] - pos[None, :, 1]) - rad[None]
+        trunk = (np.abs(r) < 0.01).any(1) & (xyz[:, 2] > 0.03 * xyz[:, 0] + 0.3)
+        sem = np.where(trunk, 1, 2).astype(np.int8)
+        sem[::97] = -1
+        np.savez(d / "sem0.02" / q.name, sem=sem, hag=np.zeros(len(sem), np.float16))
+    fj = d / "frame.json"
+    fr = json.loads(fj.read_text()); fr["semantic"] = dict(stamp={"synthetic": 1}, tally={}); fj.write_text(json.dumps(fr))
+
+
+def test_tree_task_trains_evaluates_and_keeps_its_own_checkpoints():
+    import torch
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        _add_sem(t, pos, rad)
+        r = subprocess.run([sys.executable, str(V2 / "prep_cache.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0 and "tree / non-tree labels: included" in r.stdout, r.stdout[-1500:] + r.stderr[-1500:]
+        _with_env(env)
+        import data as D
+        a, b = D.TileStore(), D.CacheStore()
+        ca, cb = a.crop(24.0, 15.0, 8.0), b.crop(24.0, 15.0, 8.0)
+        oa, ob = np.lexsort(ca["xyz"].T), np.lexsort(cb["xyz"].T)
+        assert np.array_equal(ca["sem"][oa], cb["sem"][ob]) and (cb["sem"] == 1).any()
+        env.update(V2_ENCODER="fake", V2_DEVICE="cpu", V2_STEPS="12", V2_EVAL_EVERY="6", V2_ACCUM="1",
+                   V2_CAP="40000", V2_PROGRESS_S="0", V2_TASK="base+tree")
+        r = subprocess.run([sys.executable, str(V2 / "train.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        res, models = Path(t) / "res", Path(t) / "data" / "stemnet_v2" / "models"
+        log = (res / "stemnet_v2_train_tree.txt").read_text()
+        assert log.count("TREE all labelled: mIoU") == 2 and log.count("TREE matched only") == 2, log[-2000:]
+        assert " tree " in log and "done: 12 steps" in log and "best tree mIoU" in log, log[-1500:]
+        assert not (res / "stemnet_v2_train.txt").exists()            # base-task log untouched
+        ck = torch.load(models / "head_tree_last.pth", weights_only=False)
+        assert "tree.weight" in ck["head"] and ck["task"] == "base+tree"
+        assert (models / "head_tree_best_miou.pth").exists() and not (models / "head_last.pth").exists()
+        assert (res / "51_stemnet_v2_val_tree.png").stat().st_size > 10000
+        env["V2_STEPS"] = "14"
+        r = subprocess.run([sys.executable, str(V2 / "train.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0 and "resuming from step 12" in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
+
+
+def test_tree_task_refuses_crops_without_tree_labels():
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        env.update(V2_ENCODER="fake", V2_DEVICE="cpu", V2_STEPS="2", V2_TASK="base+tree")
+        r = subprocess.run([sys.executable, str(V2 / "train.py")], env=env, capture_output=True, text=True)
+        assert r.returncode != 0 and "run v2_semantic" in r.stdout + r.stderr, r.stdout[-1500:] + r.stderr[-1500:]
 
 
 def test_kmeans_recovers_separated_blobs():
