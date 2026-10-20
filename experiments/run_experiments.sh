@@ -156,7 +156,7 @@ v2_bases()   { log "StemNet v2 — prep part 3: bases = survey + shift, audited 
 v2_labels()  { log "StemNet v2 — prep part 5: per-point labels (CPU)"; $RUN v2_labels; }
 v2_export()  { log "StemNet v2 — export scan columns around 80 survey points (CPU)"; $RUN v2_export; }
 v2_splits()  { log "StemNet v2 — prep part 4: train/val/test regions (CPU)"; $RUN v2_splits; }
-v2_semantic() { log "StemNet v2 — prep part 5b: tree / non-tree labels from campus_pred_B24 (CPU, skips if current)"; $RUN v2_semantic; }
+v2_semantic() { log "StemNet v2 — prep part 5b: tree / non-tree labels from campus_pred_B24 (CPU; downloads it from Kaggle if data/raw has none; skips if current)"; $RUN v2_semantic; }
 v2_cache()   { log "StemNet v2 — prep part 6: sorted training cache (CPU, ~10 min, skips if current)"; $RUN v2_cache; }
 v2_train_build() { log "Building stemnet_v2 GPU image (on the sonata image)"
                    $DC build sonata; $DC build v2_train_build; }

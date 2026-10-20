@@ -215,7 +215,7 @@ function V2Export  { Log "StemNet v2 - export scan columns around 80 survey poin
     Invoke-Stage "v2_export" }
 function V2Splits  { Log "StemNet v2 - prep part 4: train/val/test regions (CPU)"
     Invoke-Stage "v2_splits" }
-function V2Semantic { Log "StemNet v2 - prep part 5b: tree / non-tree labels from campus_pred_B24 (CPU, skips if current)"
+function V2Semantic { Log "StemNet v2 - prep part 5b: tree / non-tree labels from campus_pred_B24 (CPU; downloads it from Kaggle if data/raw has none; skips if current)"
     Invoke-Stage "v2_semantic" }
 function V2Cache   { Log "StemNet v2 - prep part 6: sorted training cache (CPU, ~10 min, skips if current)"
     Invoke-Stage "v2_cache" }

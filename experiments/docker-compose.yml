@@ -309,7 +309,8 @@ services:
 
   # Prep part 5b: tree / non-tree labels per grid point, carried over from
   # data/raw/campus_pred_B24.laz (ground-removed, height above ground). CPU,
-  # tens of minutes. Skips itself when already up to date.
+  # tens of minutes. Skips itself when already up to date. No file in data/raw:
+  # downloads it first from Kaggle (brkdrd/campus-data-tree-no-tree-split, public).
   v2_semantic:
     image: carbonpoly/stemnet_v2
     env_file: [.env]

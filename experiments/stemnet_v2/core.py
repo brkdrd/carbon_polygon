@@ -33,6 +33,7 @@ def find_laz() -> Path:
     if named.exists():
         return named
     hits = sorted(raw.rglob("*.laz")) + sorted(raw.rglob("*.las"))
+    hits = [h for h in hits if h.name != "campus_pred_B24.laz"]   # the tree labels, not the scan
     if not hits:
         raise SystemExit(f"[v2] no .laz/.las under {raw} — put the campus scan there")
     return hits[0]

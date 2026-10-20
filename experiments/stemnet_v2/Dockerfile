@@ -9,6 +9,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_RETRIES=10
 
 RUN pip install --no-cache-dir numpy scipy matplotlib "laspy[lazrs]" pyproj
+# kaggle: v2_semantic downloads campus_pred_B24.laz when data/raw has none
+RUN pip install --no-cache-dir "kaggle>=1.6"
 
 # the survey is data, not code: the stem map and the girth-attributed patch
 COPY basewalker/poderevka.csv /app/poderevka.csv

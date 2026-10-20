@@ -114,6 +114,48 @@ def test_same_labels_one_tile_or_four():
     assert (a == b).mean() > 0.9999, (a != b).sum()
 
 
+FAKE_KAGGLE = """#!{py}
+import os, sys
+from pathlib import Path
+if os.environ.get("FAKE_KAGGLE_FAIL"):
+    print("401 Unauthorized"); sys.exit(1)
+assert sys.argv[sys.argv.index("-f") + 1] == "campus_pred_B24.laz"
+d = Path(sys.argv[sys.argv.index("-p") + 1])
+(d / "campus_pred_B24.laz").write_bytes(b"x" * 1000)
+(d / "campus_pred_B24.laz.kaggle-partial").write_text("resume marker")
+"""
+
+
+def _find_source(tmp, **extra):
+    bin_ = tmp / "bin"; bin_.mkdir(exist_ok=True)
+    k = bin_ / "kaggle"; k.write_text(FAKE_KAGGLE.format(py=sys.executable)); k.chmod(0o755)
+    env = dict(os.environ, DATA_DIR=str(tmp / "data"), RESULTS_DIR=str(tmp / "res"),
+               PATH=f"{bin_}{os.pathsep}{os.environ['PATH']}", **extra)
+    code = f"import sys; sys.path.insert(0, {str(SCRIPT.parent)!r}); import prep_semantic as s; print('->', s.find_source())"
+    return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+
+
+def test_downloads_the_labelled_file_when_missing():
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        r = _find_source(tmp)
+        raw = tmp / "data" / "raw"
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+        assert f"-> {raw / 'campus_pred_B24.laz'}" in r.stdout, r.stdout
+        assert (raw / "campus_pred_B24.laz").stat().st_size == 1000
+        assert [p.name for p in raw.iterdir()] == ["campus_pred_B24.laz"]          # no download leftovers
+        r2 = _find_source(tmp, FAKE_KAGGLE_FAIL="1")                              # present now: no download at all
+        assert r2.returncode == 0 and "downloading" not in r2.stdout, r2.stdout
+
+
+def test_failed_download_stops_and_leaves_nothing():
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        r = _find_source(tmp, FAKE_KAGGLE_FAIL="1")
+        assert r.returncode != 0 and "KAGGLE_USERNAME" in r.stdout + r.stderr, r.stdout + r.stderr
+        assert list((tmp / "data" / "raw").iterdir()) == []
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):

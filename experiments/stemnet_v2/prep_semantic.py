@@ -9,6 +9,10 @@ inside a 3 m column (median spread 0.30 m between quadrants), so the height
 offset (frame z - Z) is estimated per 0.5 m cell; after it, 96% of grid points
 >= 0.3 m above the ground have a labelled point within 5 cm.
 
+0. If no campus_pred_B24.laz is under data/raw, download it from the public
+   Kaggle dataset V2_SEM_KAGGLE (brkdrd/campus-data-tree-no-tree-split,
+   1.76 GB, public: the single-file download needs no credentials). It lands
+   in a temporary folder first and is moved into data/raw only when complete.
 1. Read the file once, into the shared frame (x, y minus origin_m; Z as is).
 2. Offset per 0.5 m cell: pair every grid point with the labelled points
    within V2_SEM_PAIR_M (1.5 cm) horizontally; offset = the most common
@@ -35,7 +39,9 @@ from __future__ import annotations
 
 import json
 import os
+import zipfile
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -47,6 +53,7 @@ from core import DATA, OUT, RESULTS, TILE  # noqa: E402
 
 GRID = float(os.environ.get("V2_GRID", "0.02"))
 SEM_NAME = os.environ.get("V2_SEM_LAZ", "campus_pred_B24.laz")
+KAGGLE_SEM = os.environ.get("V2_SEM_KAGGLE", "brkdrd/campus-data-tree-no-tree-split")
 CELL = float(os.environ.get("V2_SEM_CELL", "0.5"))
 PAIR_M = float(os.environ.get("V2_SEM_PAIR_M", "0.015"))
 MIN_PAIRS = int(os.environ.get("V2_SEM_MIN_PAIRS", "30"))
@@ -70,10 +77,41 @@ def tile_ij(p: Path):
 
 
 def find_source():
-    hits = sorted((DATA / "raw").rglob(SEM_NAME))
-    if not hits:
-        raise SystemExit(f"[v2-semantic] no {SEM_NAME} under {DATA / 'raw'} — put the labelled file there")
-    return hits[0]
+    raw = DATA / "raw"
+    hits = sorted(raw.rglob(SEM_NAME)) if raw.exists() else []
+    if hits:
+        log(f"labelled file: {hits[0]} ({hits[0].stat().st_size / 1e9:.2f} GB)")
+        return hits[0]
+    return download_source(raw)
+
+
+def download_source(raw):
+    """Kaggle -> a temporary folder in data/raw -> data/raw/SEM_NAME, so a broken download never looks done."""
+    log(f"no {SEM_NAME} under {raw} — downloading Kaggle dataset {KAGGLE_SEM} (1.76 GB)")
+    raw.mkdir(parents=True, exist_ok=True)
+    tmp = raw / ".campus_pred_download"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
+    t0 = time.time()
+    # the whole-dataset zip is 404 without credentials; the single file is not
+    r = subprocess.run(["kaggle", "datasets", "download", KAGGLE_SEM, "-f", SEM_NAME, "-p", str(tmp), "--force"],
+                       capture_output=True, text=True)
+    for z in tmp.rglob(SEM_NAME + ".zip"):          # older CLIs zip a large single file
+        with zipfile.ZipFile(z) as f:
+            f.extractall(tmp)
+        z.unlink()
+    hits = sorted(tmp.rglob(SEM_NAME))
+    if r.returncode != 0 or not hits:
+        print(r.stdout[-2000:]); print(r.stderr[-2000:])
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise SystemExit(f"[v2-semantic] Kaggle download of {KAGGLE_SEM} failed"
+                         + ("" if r.returncode else f" (no {SEM_NAME} in it)")
+                         + ". Check KAGGLE_USERNAME / KAGGLE_KEY in .env, or put the file in data/raw by hand.")
+    dst = raw / SEM_NAME
+    os.replace(hits[0], dst)
+    shutil.rmtree(tmp, ignore_errors=True)
+    log(f"downloaded -> {dst} ({dst.stat().st_size / 1e9:.2f} GB, {time.time() - t0:.0f} s)")
+    return dst
 
 
 def read_source(path, origin):
