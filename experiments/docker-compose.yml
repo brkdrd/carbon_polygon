@@ -383,6 +383,29 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/train.py"]
 
+  # The trained head (default head_tree_best.pth) on the held-out blocks: the
+  # detection settings tuned on val -> models/detect_params.json, then the test
+  # patch scored once. GPU. -> results/stemnet_v2_validate.txt, 53_/54_ png
+  v2_validate:
+    <<: *gpu
+    image: carbonpoly/stemnet_v2_gpu
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results, PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/validate.py"]
+
+  # The trained head over the whole campus in 50 m blocks: one LAZ per block
+  # (tree_prob, pred_tree, gate_prob, B24 label, split) in
+  # data/stemnet_v2/infer/<checkpoint>/, every detected base in
+  # results/stemnet_v2_infer_bases.csv. GPU. V2_INFER_BBOX limits the area.
+  v2_infer:
+    <<: *gpu
+    image: carbonpoly/stemnet_v2_gpu
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results, PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/infer.py"]
+
   # Probe, no training: frozen Sonata (+/- the 12 covariance features) on a
   # 24 m val region, k-means without labels, mapped back onto the points.
   # GPU, a few minutes. -> results/stemnet_v2_segment.txt, 47_/48_ png, .ply

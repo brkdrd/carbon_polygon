@@ -243,7 +243,7 @@ def save(path, head, opt, step, best, mu, sd, ev, best_miou=-1.0):
                              encoder=ENCODER, colour="zeros", task=TASK, lambda_tree=LAMBDA_TREE)), path)
 
 
-def figure(gt, det, pair, bbox, path):
+def figure(gt, det, pair, bbox, path, title="StemNet v2 on the val square, match 0.5 m"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -255,12 +255,12 @@ def figure(gt, det, pair, bbox, path):
     ax.scatter(det[tp, 0], det[tp, 1], s=12, c="tab:green", marker="x", label="detection, correct")
     ax.scatter(det[pair == -1, 0], det[pair == -1, 1], s=12, c="tab:red", marker="x", label="detection, false")
     ax.set_xlim(bbox[0], bbox[1]); ax.set_ylim(bbox[2], bbox[3]); ax.set_aspect("equal")
-    ax.legend(loc="upper right"); ax.set_title("StemNet v2 on the val square, match 0.5 m")
+    ax.legend(loc="upper right"); ax.set_title(title)
     fig.tight_layout(); fig.savefig(path, dpi=110); plt.close(fig)
 
 
-def tree_figure(R, bbox, step, t, path, px=0.1):
-    """Val square from above: per pixel, the highest point's outcome."""
+def tree_figure(R, bbox, step, t, path, px=0.1, name="Val square"):
+    """A region from above: per pixel, the highest point's outcome."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -282,7 +282,7 @@ def tree_figure(R, bbox, step, t, path, px=0.1):
     from matplotlib.patches import Patch
     ax.legend(handles=[Patch(color=c, label=l) for c, l in zip(pal, ("tree, right", "non-tree, right",
               "said tree, is non-tree", "said non-tree, is tree", "no label"))], loc="upper right")
-    ax.set_title(f"Val square from above (highest point per {px * 100:g} cm pixel), step {step}: "
+    ax.set_title(f"{name} from above (highest point per {px * 100:g} cm pixel), step {step}: "
                  f"mIoU {t['miou']:.3f}, acc {t['acc']:.3f}")
     fig.tight_layout(); fig.savefig(path, dpi=110); plt.close(fig)
 

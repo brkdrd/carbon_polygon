@@ -230,6 +230,10 @@ function V2View    { Log "StemNet v2 - look at the points in squares across the 
     Invoke-Stage "v2_view" }
 function V2TrainTree { Log "StemNet v2 - train gate/offset + tree/non-tree, val every 5,000 (GPU)"
     Invoke-Stage "v2_train_tree" }
+function V2Validate { Log "StemNet v2 - validate: tune detection on val, score the test patch once (GPU)"
+    Invoke-Stage "v2_validate" }
+function V2Infer { Log "StemNet v2 - inference over the campus: LAZ with tree / gate probabilities + bases (GPU)"
+    Invoke-Stage "v2_infer" }
 function V2Segment { Log "StemNet v2 - probe: frozen Sonata +/- features, k-means, no labels (GPU)"
     Invoke-Stage "v2_segment" }
 function ScBuild { Log "Building sonata_cluster image (on the sonata image)"
@@ -310,6 +314,9 @@ switch ($Target) {
     "v2_cache" { V2Build; V2Cache }
     "v2_train" { V2Build; V2Cache; V2TrainBuild; V2TrainTest; V2Train }
     "v2_segment" { V2TrainBuild; V2TrainTest; V2Segment }
+    "v2_validate" { V2TrainBuild; V2TrainTest; V2Validate }
+    "v2_infer" { V2TrainBuild; V2TrainTest; V2Infer }
+    "v2_eval" { V2TrainBuild; V2TrainTest; V2Validate; V2Infer }
     "sc_test" { ScBuild; ScTest }
     "cluster" { ScBuild; ScTest; ScRun }
     "cluster_geom" { ScBuild; ScTest; ScGeom }
@@ -322,7 +329,7 @@ switch ($Target) {
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|cluster|cluster_tile|cluster_geom|sc_test]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|v2_semantic|v2_train_tree|v2_validate|v2_infer|v2_eval|cluster|cluster_tile|cluster_geom|sc_test]"
         exit 2
     }
 }

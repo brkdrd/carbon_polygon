@@ -66,7 +66,7 @@ def _with_env(env):
     for k, v in env.items():
         os.environ[k] = v
     sys.path.insert(0, str(V2))
-    for m in ("core", "data", "model", "vote", "train"):
+    for m in ("core", "data", "model", "vote", "train", "infer", "validate"):
         sys.modules.pop(m, None)
 
 
@@ -234,6 +234,76 @@ def test_tree_task_refuses_crops_without_tree_labels():
         env.update(V2_ENCODER="fake", V2_DEVICE="cpu", V2_STEPS="2", V2_TASK="base+tree")
         r = subprocess.run([sys.executable, str(V2 / "train.py")], env=env, capture_output=True, text=True)
         assert r.returncode != 0 and "run v2_semantic" in r.stdout + r.stderr, r.stdout[-1500:] + r.stderr[-1500:]
+
+
+def test_blocks_cover_every_point_once_and_find_every_base_once():
+    """Perfect predictions through v2_infer's blocks: no point written twice or
+    lost at a block edge, no base lost or doubled where blocks meet."""
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        _add_sem(t, pos, rad)
+        _with_env(env)
+        import data as D, infer as I, vote as V
+        store = D.TileStore()
+        occ = np.load(Path(t) / "data" / "stemnet_v2" / "regions.npz")["occupancy"]
+        cores = I.blocks((0.0, W, 0.0, W), occ, block=7.0)              # 5 x 5 blocks, edges cut through trees
+        oracle = lambda c: (c["gate"].astype(np.float32), c["offset"].astype(np.float32),  # noqa: E731
+                            (c["sem"] == 1).astype(np.float32))
+        params = dict(p_thresh=V.P_THRESH, peak_sep=V.PEAK_SEP, peak_min=V.PEAK_MIN)
+        keys, det = [], []
+        for core, R, inside, d, s, n in I.iter_blocks(oracle, store, cores, params, np.random.default_rng(0), margin=4.0):
+            keys.append(R["tile"][inside] * 10**8 + R["row"][inside]); det.append(d)
+            assert np.array_equal(R["tree"][inside] >= 0.5, R["sem"][inside] == 1)
+        keys, det = np.concatenate(keys), np.concatenate(det)
+        total = sum(len(store.tile(ij)["xyz"]) for ij in store.have)
+        assert len(keys) == len(np.unique(keys)) == total, (len(keys), len(np.unique(keys)), total)
+        m = V.match(det, np.ones(len(det)), pos, 0.3)
+        assert m["recall"] == 1.0 and m["precision"] == 1.0, {k: v for k, v in m.items() if k != "pair"}
+
+
+def test_validate_and_infer_run_end_to_end():
+    import laspy
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        _add_sem(t, pos, rad)
+        d = Path(t) / "data" / "stemnet_v2"
+        split = np.zeros((int(W), int(W)), np.uint8)
+        split[:, 10:12] = 3; split[:, 12:18] = 2; split[:, 18:20] = 3; split[:, 20:] = 1   # train | test | val
+        np.savez(d / "regions.npz", split=split, occupancy=np.ones_like(split, np.int32))
+        r = subprocess.run([sys.executable, str(V2 / "prep_cache.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+        env.update(V2_ENCODER="fake", V2_DEVICE="cpu", V2_STEPS="12", V2_EVAL_EVERY="12", V2_ACCUM="1",
+                   V2_CAP="40000", V2_PROGRESS_S="0", V2_TASK="base+tree", V2_INFER_BLOCK="12",
+                   V2_VAL_P="0.5,0.9", V2_VAL_SEP="0.3", V2_VAL_MASS="1,10")
+        for script in ("train.py", "validate.py", "infer.py"):
+            r = subprocess.run([sys.executable, str(V2 / script)], env=env, capture_output=True, text=True)
+            assert r.returncode == 0, (script, r.stdout[-3000:] + r.stderr[-3000:])
+        res = Path(t) / "res"
+        log = (res / "stemnet_v2_validate.txt").read_text()
+        for s in ("checkpoint head_tree_best.pth", "VAL default settings", "sweep on val: 4 settings",
+                  "TEST default settings", "TEST val-tuned settings", "TREE test all labelled", "recall@0.5 by tier"):
+            assert s in log, (s, log[-3000:])
+        prm = json.loads((d / "models" / "detect_params.json").read_text())
+        assert prm["checkpoint"] == "head_tree_best.pth" and prm["p_thresh"] in (0.5, 0.9)
+        for f in ("stemnet_v2_test_detections.csv", "53_stemnet_v2_test.png", "54_stemnet_v2_test_tree.png"):
+            assert (res / f).exists(), f
+        log = (res / "stemnet_v2_infer.txt").read_text()
+        assert "detection settings tuned on val" in log and "9 blocks" in log, log[:2000]
+        assert "tree head vs the campus_pred_B24 labels" in log and "  test " in log, log[-2500:]
+        assert (res / "52_stemnet_v2_infer_map.png").exists() and (res / "stemnet_v2_infer_bases.csv").exists()
+        lazs = sorted((d / "infer" / "head_tree_best").glob("block_*.laz"))
+        assert len(lazs) == 9, lazs
+        got = [laspy.read(str(q)) for q in lazs]
+        xyz = np.concatenate([np.column_stack([g.x, g.y, g.z]) for g in got])
+        grid = np.concatenate([np.load(q)["xyz"] for q in sorted((d / "grid0.02").glob("tile_*.npz"))]).astype(np.float64)
+        assert len(xyz) == len(grid), (len(xyz), len(grid))
+        from scipy.spatial import cKDTree
+        dist, idx = cKDTree(grid).query(xyz)                         # each grid point once, at its place (mm scale)
+        assert dist.max() < 0.001 and len(np.unique(idx)) == len(grid), (dist.max(), len(np.unique(idx)))
+        tp = np.concatenate([np.asarray(g.tree_prob) for g in got])
+        assert ((tp >= 0) & (tp <= 1)).all()
+        assert set(np.unique(np.concatenate([np.asarray(g.split) for g in got]))) == {0, 1, 2, 3}
+        assert np.array_equal(np.concatenate([np.asarray(g.pred_tree) for g in got]), (tp >= 0.5).astype(np.uint8))
 
 
 def test_kmeans_recovers_separated_blobs():
