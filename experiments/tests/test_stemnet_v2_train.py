@@ -192,7 +192,7 @@ def _add_sem(t, pos, rad):
         trunk = (np.abs(r) < 0.01).any(1) & (xyz[:, 2] > 0.03 * xyz[:, 0] + 0.3)
         sem = np.where(trunk, 1, 2).astype(np.int8)
         sem[::97] = -1
-        np.savez(d / "sem0.02" / q.name, sem=sem, hag=np.zeros(len(sem), np.float16))
+        np.savez(d / "sem0.02" / q.name, sem=sem, hag=(xyz[:, 2] - 0.03 * xyz[:, 0]).astype(np.float16))
     fj = d / "frame.json"
     fr = json.loads(fj.read_text()); fr["semantic"] = dict(stamp={"synthetic": 1}, tally={}); fj.write_text(json.dumps(fr))
 
@@ -304,6 +304,13 @@ def test_validate_and_infer_run_end_to_end():
         assert ((tp >= 0) & (tp <= 1)).all()
         assert set(np.unique(np.concatenate([np.asarray(g.split) for g in got]))) == {0, 1, 2, 3}
         assert np.array_equal(np.concatenate([np.asarray(g.pred_tree) for g in got]), (tp >= 0.5).astype(np.uint8))
+        r = subprocess.run([sys.executable, str(V2 / "inspect_infer.py")], env=dict(env, V2_INSPECT_SIZE="6", V2_INSPECT_SPOTS="2"),
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        log = (res / "stemnet_v2_inspect.txt").read_text()
+        assert f"{len(grid):,} of {len(grid):,} points (100.00%)" in log, log[-3000:]       # every LAZ point found in the grid
+        assert "surveyed trunks, train" in log and "test detections" in log and "calibration" in log, log[-3000:]
+        assert (res / "55_stemnet_v2_inspect.png").exists() and list(res.glob("56_stemnet_v2_inspect_tree_f*_1.png")), log[-2000:]
 
 
 def test_kmeans_recovers_separated_blobs():

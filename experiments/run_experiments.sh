@@ -166,6 +166,7 @@ v2_view()    { log "StemNet v2 — look at the points in squares across the camp
 v2_train_tree() { log "StemNet v2 — train gate/offset + tree/non-tree, val every 5,000 (GPU)"; $RUN v2_train_tree; }
 v2_validate() { log "StemNet v2 — validate: tune detection on val, score the test patch once (GPU)"; $RUN v2_validate; }
 v2_infer()   { log "StemNet v2 — inference over the campus: LAZ with tree / gate probabilities + bases (GPU)"; $RUN v2_infer; }
+v2_inspect() { log "StemNet v2 — inspect the inference: errors by height, surveyed trunks, close-ups (CPU)"; $RUN v2_inspect; }
 v2_segment() { log "StemNet v2 — probe: frozen Sonata +/- features, k-means, no labels (GPU)"; $RUN v2_segment; }
 sc_build() { log "Building sonata_cluster image (on the sonata image)"
              $DC build sonata; $DC build sc_build; }
@@ -245,6 +246,7 @@ case "${1:-all}" in
   v2_validate) v2_train_build; v2_train_test; v2_validate ;;
   v2_infer) v2_train_build; v2_train_test; v2_infer ;;
   v2_eval) v2_train_build; v2_train_test; v2_validate; v2_infer ;;
+  v2_inspect) v2_build; v2_inspect ;;
   sc_test) sc_build; sc_test ;;
   cluster) sc_build; sc_test; sc_run ;;
   cluster_geom) sc_build; sc_test; sc_geom ;;
@@ -255,5 +257,5 @@ basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
 gw_diag|\
 gw_height|gw_head|\
-stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|v2_semantic|v2_train_tree|v2_validate|v2_infer|v2_eval|cluster|cluster_tile|cluster_geom|sc_test]"; exit 2 ;;
+stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|v2_semantic|v2_train_tree|v2_validate|v2_infer|v2_eval|v2_inspect|cluster|cluster_tile|cluster_geom|sc_test]"; exit 2 ;;
 esac

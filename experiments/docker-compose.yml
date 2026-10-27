@@ -406,6 +406,17 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/infer.py"]
 
+  # Reads v2_infer's LAZ blocks (no GPU, nothing predicted again): head vs B24
+  # by height and confidence, surveyed trunks as an independent check, val /
+  # test detections vs the survey, and close-ups of the worst spots.
+  # CPU. -> results/stemnet_v2_inspect.txt, 55_ / 56_ png
+  v2_inspect:
+    image: carbonpoly/stemnet_v2
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/inspect_infer.py"]
+
   # Probe, no training: frozen Sonata (+/- the 12 covariance features) on a
   # 24 m val region, k-means without labels, mapped back onto the points.
   # GPU, a few minutes. -> results/stemnet_v2_segment.txt, 47_/48_ png, .ply
