@@ -428,6 +428,19 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/curves.py"]
 
+  # Base-only (head_best.pth) vs base + tree (head_tree_best.pth) against the
+  # survey bases on val and test, every gate threshold, ranked by vote mass:
+  # AP, FROC, recall at fixed precision, per-tree and per-detection sheets.
+  # GPU for the predictions it has not saved yet (~45 min per model), then CPU.
+  # -> results/stemnet_v2_compare.xlsx, .txt, 58_ png
+  v2_compare:
+    <<: *gpu
+    image: carbonpoly/stemnet_v2_gpu
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results, PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/compare.py"]
+
   # Probe, no training: frozen Sonata (+/- the 12 covariance features) on a
   # 24 m val region, k-means without labels, mapped back onto the points.
   # GPU, a few minutes. -> results/stemnet_v2_segment.txt, 47_/48_ png, .ply

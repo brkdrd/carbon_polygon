@@ -341,6 +341,41 @@ def test_validate_and_infer_run_end_to_end():
         assert (res / "55_stemnet_v2_inspect.png").exists() and list(res.glob("56_stemnet_v2_inspect_tree_f*_1.png")), log[-2000:]
 
 
+def test_compare_scores_both_models_into_one_spreadsheet():
+    from openpyxl import load_workbook
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        _add_sem(t, pos, rad)
+        d = Path(t) / "data" / "stemnet_v2"
+        split = np.zeros((int(W), int(W)), np.uint8)
+        split[:, 10:12] = 3; split[:, 12:18] = 2; split[:, 18:20] = 3; split[:, 20:] = 1   # train | test | val
+        np.savez(d / "regions.npz", split=split, occupancy=np.ones_like(split, np.int32))
+        r = subprocess.run([sys.executable, str(V2 / "prep_cache.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+        env.update(V2_ENCODER="fake", V2_DEVICE="cpu", V2_STEPS="12", V2_EVAL_EVERY="12", V2_ACCUM="1",
+                   V2_CAP="40000", V2_PROGRESS_S="0", V2_INFER_BLOCK="12", V2_CURVE_P="0.5,0.9")
+        for task in ("base", "base+tree"):
+            r = subprocess.run([sys.executable, str(V2 / "train.py")], env=dict(env, V2_TASK=task), capture_output=True, text=True)
+            assert r.returncode == 0, (task, r.stdout[-2000:] + r.stderr[-2000:])
+        r = subprocess.run([sys.executable, str(V2 / "compare.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        res = Path(t) / "res"
+        log = (res / "stemnet_v2_compare.txt").read_text()
+        assert log.count("val-chosen cut (vote mass") == 2 and "base-only" in log and "base+tree" in log, log[-3000:]
+        assert "recall at precision >=" in log and "at maximum recall" in log, log[-3000:]
+        wb = load_workbook(res / "stemnet_v2_compare.xlsx", read_only=True)
+        assert wb.sheetnames == ["README", "Summary", "PerGate", "Breakdown", "Curves", "Detections", "SurveyTrees"]
+        rows = {n: list(wb[n].iter_rows(values_only=True)) for n in wb.sheetnames}
+        assert [r_[0] for r_ in rows["Summary"][1:]] == ["base-only", "base+tree"], rows["Summary"]
+        assert len(rows["PerGate"]) == 1 + 2 * 2 * 2                         # models x splits x gates
+        n_gt = sum(1 for x, y in pos if 12 <= x < 18) + sum(1 for x, y in pos if x >= 20)
+        assert len(rows["SurveyTrees"]) == 1 + n_gt and len(rows["SurveyTrees"][0]) == 10 + 2 * 4
+        assert (res / "58_stemnet_v2_compare.png").exists()
+        r = subprocess.run([sys.executable, str(V2 / "compare.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0 and r.stdout.count("saved predictions reused") == 4, r.stdout[-2000:] + r.stderr[-2000:]
+        assert (res / "stemnet_v2_compare.txt").read_text().splitlines()[-3:] == log.splitlines()[-3:]
+
+
 def test_detection_curve_equals_rematching_at_every_threshold():
     """One greedy matching, read off cumulatively, must equal matching only the
     detections above each threshold; AP is 1 for a perfect ranking."""

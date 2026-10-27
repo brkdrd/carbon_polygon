@@ -101,7 +101,7 @@ def predict_split(runner, store, regions, sid, rng, cpath=None, ck=None):
     d = OUT / "predictions" / cpath.stem / I.SPLITS[sid] if cpath is not None else None
     stamp = pred_stamp(cpath, ck, bbox) if d is not None else None
     if d is not None and (d / "stamp.json").exists() and json.loads((d / "stamp.json").read_text()) == stamp:
-        R = {k: np.load(d / f"{k}.npy") for k in PRED_KEYS}
+        R = {k: np.load(d / f"{k}.npy", mmap_mode="r") for k in PRED_KEYS}
         log(f"{I.SPLITS[sid]}: {len(R['xy']):,} saved predictions reused ({d})")
         return R, bbox
     cores = I.blocks(bbox, regions["occupancy"])

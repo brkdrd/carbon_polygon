@@ -6,8 +6,8 @@
 # nothing from the older tracks; only stemnet_v2's own code goes in.
 FROM carbonpoly/sonata
 
-# laspy: v2_infer writes LAZ
-RUN pip install --no-cache-dir pyproj "laspy[lazrs]"
+# laspy: v2_infer writes LAZ; openpyxl: v2_compare writes the spreadsheet
+RUN pip install --no-cache-dir pyproj "laspy[lazrs]" openpyxl
 
 # own directory: the base image's /app/train_head.py etc. are not ours
 COPY basewalker/poderevka.csv /app/poderevka.csv

@@ -70,8 +70,8 @@ def log(msg):
         f.write(line + "\n")
 
 
-def checkpoint():
-    name = os.environ.get("V2_CKPT", "")
+def checkpoint(name=None):
+    name = name if name is not None else os.environ.get("V2_CKPT", "")
     cands = [name] if name else ["head_tree_best.pth", "head_best.pth"]
     for c in cands:
         p = Path(c) if os.sep in c else T.MODELS / c
@@ -80,17 +80,19 @@ def checkpoint():
     raise SystemExit(f"[v2] no checkpoint ({', '.join(cands)}) in {T.MODELS} — run v2_train_tree")
 
 
-def load_runner(log):
-    """-> (Runner, checkpoint dict, checkpoint path), head in eval mode on V2_DEVICE."""
+def load_runner(log, name=None, enc=None):
+    """-> (Runner, checkpoint dict, checkpoint path), head in eval mode on V2_DEVICE.
+    name: a checkpoint file (default V2_CKPT, as checkpoint()); enc: an encoder already loaded."""
     dev = T.DEVICE
     if dev.startswith("cuda") and not torch.cuda.is_available():
         raise SystemExit("[v2] V2_DEVICE=cuda but no GPU is visible in the container — check the NVIDIA runtime")
-    path = checkpoint()
+    path = checkpoint(name)
     ck = torch.load(path, map_location=dev, weights_only=False)
     head = M.Head(ck["d_in"], tree=ck.get("task") == "base+tree").to(dev)
     head.load_state_dict(ck["head"])
     head.eval()
-    enc = M.load_sonata(dev) if T.ENCODER == "sonata" else M.FakeEncoder()
+    if enc is None:
+        enc = M.load_sonata(dev) if T.ENCODER == "sonata" else M.FakeEncoder()
     ev = ck.get("eval") or {}
     log(f"checkpoint {path.name}: step {ck['step']}, task {ck.get('task', 'base')}, best val F1@0.5 "
         f"{ck['best']:.3f}" + (f", tree mIoU {ev['tree']['miou']:.3f}" if "tree" in ev else "") + f" | device {dev}")
