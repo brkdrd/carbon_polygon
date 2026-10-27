@@ -151,6 +151,29 @@ class Runner:
         return res
 
 
+def archive_longer_run():
+    """Checkpoints of a run with a LONGER schedule than V2_STEPS belong to a
+    different run (run 1: 150,000 steps, killed by a NaN at ~18,850): they are
+    moved aside with their log and outputs (name + _<steps>steps), never
+    continued. A shorter one is resumed and extended, as before. -> note or None."""
+    if not RESUME:
+        return None
+    for path in (LAST, BEST):
+        if path.exists():
+            n = int(torch.load(path, map_location="cpu", weights_only=False).get("cfg", {}).get("steps", STEPS))
+            if n <= STEPS:
+                return None
+            moved = []
+            for q in (LAST, BEST, BEST_MIOU, LOG, RESULTS / f"stemnet_v2_val_detections{SUF}.csv",
+                      RESULTS / f"46_stemnet_v2_val{SUF}.png"):
+                if q.exists():
+                    q.rename(q.with_name(f"{q.stem}_{n}steps{q.suffix}"))
+                    moved.append(q.name)
+            return (f"previous run had a {n:,}-step schedule, this one {STEPS:,}: not continuing it — moved aside "
+                    f"as *_{n}steps: {', '.join(moved)}; starting from step 0")
+    return None
+
+
 def finite(head):
     return all(bool(torch.isfinite(p).all()) for p in head.parameters())
 
@@ -289,6 +312,9 @@ def tree_figure(R, bbox, step, t, path, px=0.1, name="Val square"):
 
 def main():
     RESULTS.mkdir(parents=True, exist_ok=True)
+    note = archive_longer_run()
+    if note:
+        log(note)
     frame = json.loads((OUT / "frame.json").read_text())
     if "labels" not in frame:
         raise SystemExit("[v2-train] no labels — run v2_labels first")

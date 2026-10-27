@@ -197,6 +197,26 @@ def _add_sem(t, pos, rad):
     fr = json.loads(fj.read_text()); fr["semantic"] = dict(stamp={"synthetic": 1}, tally={}); fj.write_text(json.dumps(fr))
 
 
+def test_a_longer_old_run_is_moved_aside_not_continued():
+    """Run 1 (150,000-step schedule, NaN at ~18,850) must not be resumed by a
+    50,000-step run: its files move aside and training starts from 0."""
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        env.update(V2_ENCODER="fake", V2_DEVICE="cpu", V2_STEPS="12", V2_EVAL_EVERY="12", V2_ACCUM="1",
+                   V2_CAP="40000", V2_PROGRESS_S="0")
+        r = subprocess.run([sys.executable, str(V2 / "train.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+        env["V2_STEPS"] = "6"; env["V2_EVAL_EVERY"] = "6"
+        r = subprocess.run([sys.executable, str(V2 / "train.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+        assert "12-step schedule, this one 6: not continuing it" in r.stdout and "resuming" not in r.stdout, r.stdout[-2000:]
+        models, res = Path(t) / "data" / "stemnet_v2" / "models", Path(t) / "res"
+        for q in (models / "head_last_12steps.pth", models / "head_best_12steps.pth", res / "stemnet_v2_train_12steps.txt"):
+            assert q.exists(), q
+        log = (res / "stemnet_v2_train.txt").read_text()
+        assert "done: 6 steps" in log and "step 1/6" in log, log[-1500:]
+
+
 def test_tree_task_trains_evaluates_and_keeps_its_own_checkpoints():
     import torch
     with tempfile.TemporaryDirectory() as t:
