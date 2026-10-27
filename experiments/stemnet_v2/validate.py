@@ -19,6 +19,10 @@
 
 Checkpoint: as v2_infer (V2_CKPT, default head_tree_best.pth).
 
+Predictions are saved (data/stemnet_v2/predictions/<checkpoint>/val|test/,
+~1.5 GB + ~3.5 GB) and reused by a rerun with the same checkpoint and by
+v2_curves.
+
 Outputs:
   results/stemnet_v2_validate.txt
   results/stemnet_v2_test_detections.csv   val-tuned settings: x, y, utm, score,
@@ -79,16 +83,41 @@ def bbox_of(regions, sid):
     return float(ii.min()), float(ii.max() + 1), float(jj.min()), float(jj.max() + 1)
 
 
-def predict_split(runner, store, regions, sid, rng):
-    """Every point of the split's bounding box, predicted block by block. -> (R, bbox)."""
+PRED_KEYS = dict(xy=np.float32, z=np.float32, p=np.float32, off=np.float32, tree=np.float16, sem=np.int8)
+
+
+def pred_stamp(cpath, ck, bbox):
+    st = cpath.stat()
+    return dict(checkpoint=cpath.name, step=int(ck["step"]), size=st.st_size, mtime=int(st.st_mtime), cap=T.CAP,
+                block=I.BLOCK, margin=I.MARGIN, bbox=list(bbox), seed=T.SEED)
+
+
+def predict_split(runner, store, regions, sid, rng, cpath=None, ck=None):
+    """Every point of the split's bounding box, predicted block by block. -> (R, bbox).
+    Saved to data/stemnet_v2/predictions/<checkpoint>/<split>/ and reused while
+    the checkpoint and settings are the same (v2_curves reads them too)."""
     t0 = time.time()
     bbox = bbox_of(regions, sid)
+    d = OUT / "predictions" / cpath.stem / I.SPLITS[sid] if cpath is not None else None
+    stamp = pred_stamp(cpath, ck, bbox) if d is not None else None
+    if d is not None and (d / "stamp.json").exists() and json.loads((d / "stamp.json").read_text()) == stamp:
+        R = {k: np.load(d / f"{k}.npy") for k in PRED_KEYS}
+        log(f"{I.SPLITS[sid]}: {len(R['xy']):,} saved predictions reused ({d})")
+        return R, bbox
     cores = I.blocks(bbox, regions["occupancy"])
     parts = [{k: v[inside] for k, v in R.items()}
              for _, R, inside, *_ in I.iter_blocks(runner.predict, store, cores, DEFAULT, rng, detect=False)]
     R = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
     log(f"{I.SPLITS[sid]}: {len(R['xy']):,} points in {bbox} predicted in {len(cores)} blocks, "
         f"{(time.time() - t0) / 60:.1f} min")
+    R = {k: R[k].astype(t) for k, t in PRED_KEYS.items()}
+    if d is not None:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "stamp.json").unlink(missing_ok=True)                  # written last: a half-saved set is never reused
+        for k, v in R.items():
+            np.save(d / f"{k}.npy", v)
+        (d / "stamp.json").write_text(json.dumps(stamp))
+        log(f"  saved -> {d} ({sum(v.nbytes for v in R.values()) / 2**30:.1f} GB)")
     return R, bbox
 
 
@@ -145,7 +174,7 @@ def main():
 
     # 1. val: sweep the detection settings
     Gv = bases_in(regions, 1)
-    Rv, _ = predict_split(runner, store, regions, 1, rng)
+    Rv, _ = predict_split(runner, store, regions, 1, rng, cpath, ck)
     xy, p, off = Rv["xy"], Rv["p"], Rv["off"]
     d0, s0, _ = V.detect(xy, p, off, **DEFAULT)
     base_v = score(d0, s0, Gv, regions, 1, 0.5)
@@ -178,7 +207,7 @@ def main():
 
     # 2. test: scored once, with the defaults and with the val-tuned settings
     Gt = bases_in(regions, 2)
-    Rt, bbox = predict_split(runner, store, regions, 2, rng)
+    Rt, bbox = predict_split(runner, store, regions, 2, rng, cpath, ck)
     log(f"TEST: the girth-attributed patch, {len(Gt['xy'])} survey bases; nothing below was chosen on it")
     res = {}
     for name, prm in (("default", DEFAULT), ("val-tuned", tuned)):

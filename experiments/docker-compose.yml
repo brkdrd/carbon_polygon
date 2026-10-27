@@ -417,6 +417,17 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/inspect_infer.py"]
 
+  # Threshold-free detection score from the predictions v2_validate saved:
+  # precision-recall / AP and FROC (recall vs false detections per ha), val
+  # picks the gate threshold, test reported once. CPU, minutes.
+  # -> results/stemnet_v2_curves.txt, .csv, 57_ png
+  v2_curves:
+    image: carbonpoly/stemnet_v2
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/curves.py"]
+
   # Probe, no training: frozen Sonata (+/- the 12 covariance features) on a
   # 24 m val region, k-means without labels, mapped back onto the points.
   # GPU, a few minutes. -> results/stemnet_v2_segment.txt, 47_/48_ png, .ply

@@ -304,6 +304,14 @@ def test_validate_and_infer_run_end_to_end():
         assert ((tp >= 0) & (tp <= 1)).all()
         assert set(np.unique(np.concatenate([np.asarray(g.split) for g in got]))) == {0, 1, 2, 3}
         assert np.array_equal(np.concatenate([np.asarray(g.pred_tree) for g in got]), (tp >= 0.5).astype(np.uint8))
+        r = subprocess.run([sys.executable, str(V2 / "validate.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0 and r.stdout.count("saved predictions reused") == 2, r.stdout[-2000:] + r.stderr[-2000:]
+        r = subprocess.run([sys.executable, str(V2 / "curves.py")], env=dict(env, V2_CURVE_P="0.5,0.9"),
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        log = (res / "stemnet_v2_curves.txt").read_text()
+        assert "TEST (held out): AP@0.5 m" in log and "chosen on val" in log and "v2_infer's settings on test" in log, log
+        assert (res / "57_stemnet_v2_curves.png").exists() and (res / "stemnet_v2_curves.csv").exists()
         r = subprocess.run([sys.executable, str(V2 / "inspect_infer.py")], env=dict(env, V2_INSPECT_SIZE="6", V2_INSPECT_SPOTS="2"),
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
@@ -311,6 +319,30 @@ def test_validate_and_infer_run_end_to_end():
         assert f"{len(grid):,} of {len(grid):,} points (100.00%)" in log, log[-3000:]       # every LAZ point found in the grid
         assert "surveyed trunks, train" in log and "test detections" in log and "calibration" in log, log[-3000:]
         assert (res / "55_stemnet_v2_inspect.png").exists() and list(res.glob("56_stemnet_v2_inspect_tree_f*_1.png")), log[-2000:]
+
+
+def test_detection_curve_equals_rematching_at_every_threshold():
+    """One greedy matching, read off cumulatively, must equal matching only the
+    detections above each threshold; AP is 1 for a perfect ranking."""
+    sys.path.insert(0, str(V2))
+    import curves as C, vote as V
+    rng = np.random.default_rng(3)
+    gt = rng.uniform(0, 30, (60, 2))
+    det = np.r_[gt[:45] + rng.normal(0, 0.25, (45, 2)), rng.uniform(0, 30, (40, 2)), gt[:10] + rng.normal(0, 0.3, (10, 2))]
+    score = rng.uniform(1, 100, len(det))
+    ignore = det[:, 0] > 27
+    for radius in (0.5, 0.3):
+        c = C.curve(det, score, gt, radius, ignore)
+        for t in np.r_[np.sort(score)[::7], 0.0]:
+            k = score >= t
+            m = V.match(det[k], score[k], gt, radius, ignore=ignore[k])
+            n = np.flatnonzero(c["score"] >= t)
+            tp, fp = (c["tp"][n[-1]], c["fp"][n[-1]]) if len(n) else (0, 0)
+            assert (tp, fp) == (m["tp"], m["fp"]), (radius, t, tp, fp, m["tp"], m["fp"])
+    perfect = C.curve(gt.copy(), np.arange(len(gt), 0, -1.0), gt, 0.5)
+    assert abs(C.ap(perfect) - 1.0) < 1e-9
+    worse = C.curve(np.r_[gt + 5.0, gt], np.r_[np.full(len(gt), 9.0), np.full(len(gt), 1.0)], gt, 0.5)
+    assert C.ap(worse) < 0.6 and abs(worse["tp"][-1] / len(gt) - 1.0) < 1e-9
 
 
 def test_kmeans_recovers_separated_blobs():
