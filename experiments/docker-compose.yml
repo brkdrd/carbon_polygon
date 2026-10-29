@@ -460,7 +460,7 @@ services:
   # -> results/stemnet_v2_kaggle.txt (the check + download commands)
   v2_kaggle:
     image: carbonpoly/stemnet_v2
-    env_file: [.env]
+    env_file: [.env, kaggle_upload.env]           # kaggle_upload.env: the one-off token, committed on request
     environment: { DATA_DIR: /data, RESULTS_DIR: /results }
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/kaggle_push.py"]
