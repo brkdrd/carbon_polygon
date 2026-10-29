@@ -454,8 +454,10 @@ services:
 
   # Push result files to a PRIVATE Kaggle dataset in the .env account
   # (default <KAGGLE_USERNAME>/carbon-polygon-results): created on the first
-  # push, a new version after. Files: V2_KAGGLE_FILES (default the val LAZ +
-  # its csv / txt). CPU. -> results/stemnet_v2_kaggle.txt (download commands)
+  # push, a new version after. Files: V2_KAGGLE_FILES (default only
+  # stemnet_v2_val.laz). Checks the LAZ before, waits for Kaggle after and
+  # compares every byte size: COMPLETE / INCOMPLETE. CPU.
+  # -> results/stemnet_v2_kaggle.txt (the check + download commands)
   v2_kaggle:
     image: carbonpoly/stemnet_v2
     env_file: [.env]
