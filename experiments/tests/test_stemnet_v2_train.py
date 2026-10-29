@@ -374,6 +374,22 @@ def test_compare_scores_both_models_into_one_spreadsheet():
         r = subprocess.run([sys.executable, str(V2 / "compare.py")], env=env, capture_output=True, text=True)
         assert r.returncode == 0 and r.stdout.count("saved predictions reused") == 4, r.stdout[-2000:] + r.stderr[-2000:]
         assert (res / "stemnet_v2_compare.txt").read_text().splitlines()[-3:] == log.splitlines()[-3:]
+        import laspy
+        r = subprocess.run([sys.executable, str(V2 / "export_val.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        las = laspy.read(str(res / "stemnet_v2_val_points.laz"))
+        grid = np.concatenate([np.load(q)["xyz"] for q in sorted((d / "grid0.02").glob("tile_*.npz"))])
+        val = grid[grid[:, 0] >= 20]
+        assert len(las.x) == len(val), (len(las.x), len(val))                 # every val point once
+        assert "scan RGB joined for" in r.stdout and "(100.00%)" in r.stdout, r.stdout[-2000:]
+        for f in ("gate_base_only", "gate_base_tree", "vote_base_only", "vote_base_tree", "tree_prob", "pred_tree",
+                  "label_tree", "tree_vs_b24"):
+            assert f in las.point_format.extra_dimension_names, f
+        b_ = laspy.read(str(res / "stemnet_v2_val_bases.laz"))
+        assert set(np.unique(b_.classification)) == {1, 2, 3}
+        n_det = int(np.asarray(b_.base_id)[np.asarray(b_.classification) == 2].max()) + 1
+        vid = np.asarray(las.vote_base_tree)
+        assert vid.max() == n_det - 1 and set(np.unique(vid[vid >= 0])) == set(range(n_det))   # every detection has its voters
 
 
 def test_detection_curve_equals_rematching_at_every_threshold():

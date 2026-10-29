@@ -441,6 +441,17 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/compare.py"]
 
+  # The val square as LAZ from the val predictions v2_compare saved (CPU, no
+  # model run): both models' gate probabilities and votes, the tree output,
+  # B24's label; plus every detected / surveyed base as a 3 m post.
+  # -> results/stemnet_v2_val_points.laz, stemnet_v2_val_bases.laz / .csv
+  v2_val_laz:
+    image: carbonpoly/stemnet_v2
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/export_val.py"]
+
   # Probe, no training: frozen Sonata (+/- the 12 covariance features) on a
   # 24 m val region, k-means without labels, mapped back onto the points.
   # GPU, a few minutes. -> results/stemnet_v2_segment.txt, 47_/48_ png, .ply
