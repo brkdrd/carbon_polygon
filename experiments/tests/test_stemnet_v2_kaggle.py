@@ -24,9 +24,12 @@ rec = Path(os.environ["FAKE_KAGGLE_LOG"])
 if os.environ.get("FAKE_KAGGLE_NOAUTH"):
     print("Authentication required to call the Kaggle API."); sys.exit(1)
 state = Path(os.environ["FAKE_KAGGLE_STATE"])
+if a[:2] == ["datasets", "list"]:
+    print("ref  title  size"); sys.exit(0)
 if a[:2] == ["datasets", "status"]:
-    if not state.exists():
-        print("404 Client Error: Not Found"); sys.exit(1)
+    if not state.exists():                                         # what the real API answers for a new slug
+        print("403 Client Error: Forbidden for url: https://api.kaggle.com/v1/datasets.DatasetApiService/GetDatasetStatus")
+        sys.exit(1)
     st = json.loads(state.read_text())
     st["polls"] += 1; state.write_text(json.dumps(st))
     print("pending" if st["polls"] == 2 else "ready"); sys.exit(0)        # one "pending" right after an upload

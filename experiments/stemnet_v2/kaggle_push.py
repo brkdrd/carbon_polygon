@@ -264,13 +264,13 @@ def main():
             id=slug, title=slug.split("/", 1)[1].replace("-", " ")[:50].ljust(6, "_"),
             licenses=[{"name": "CC0-1.0"}]), indent=1))
 
-        st = kaggle("datasets", "status", slug, check=False)
-        said = (st.stdout + st.stderr).lower()
-        if st.returncode != 0 and any(w in said for w in ("authentication required", "401", "403", "unauthorized")):
-            print(st.stdout[-1500:]); print(st.stderr[-1500:])
-            raise SystemExit("[v2-kaggle] Kaggle refused the credentials — check KAGGLE_USERNAME / KAGGLE_KEY "
-                             "(or KAGGLE_API_TOKEN) in .env; nothing pushed")
-        exists = st.returncode == 0
+        who = kaggle("datasets", "list", "--mine", check=False)     # does the login work at all?
+        if who.returncode != 0:
+            print(who.stdout[-1500:]); print(who.stderr[-1500:])
+            raise SystemExit("[v2-kaggle] Kaggle refused the credentials — check KAGGLE_API_TOKEN (or KAGGLE_USERNAME / "
+                             "KAGGLE_KEY) in .env; nothing pushed")
+        # a dataset that does not exist yet answers 403 Forbidden, the same as one that is not ours
+        exists = kaggle("datasets", "status", slug, check=False).returncode == 0
         msg = os.environ.get("V2_KAGGLE_MESSAGE") or f"{time.strftime('%Y-%m-%d %H:%M')}: " + ", ".join(p.name for p in files)
         t0 = time.time()
         if exists:
