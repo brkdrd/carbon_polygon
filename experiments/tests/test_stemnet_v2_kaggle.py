@@ -130,7 +130,14 @@ def test_nothing_pushed_when_a_file_is_missing_or_credentials_are_refused():
         assert r.returncode != 0 and "refused the credentials" in r.stdout + r.stderr, r.stdout + r.stderr
         r = _run(_env(tmp, V2_KAGGLE_FILES="stemnet_v2_val.laz", KAGGLE_USERNAME="your_kaggle_username"))
         assert r.returncode != 0 and "no Kaggle account" in r.stdout + r.stderr, r.stdout + r.stderr
-        assert _calls(tmp) == [] and not (res / ".kaggle_upload").exists()
+        e = _env(tmp, V2_KAGGLE_FILES="stemnet_v2_val.laz"); e.pop("KAGGLE_KEY"); e.pop("KAGGLE_API_TOKEN", None)
+        r = _run(e)                                               # username but no key: say so, by name
+        assert r.returncode != 0 and "KAGGLE_KEY MISSING" in r.stdout + r.stderr and "KAGGLE_USERNAME set" in r.stdout + r.stderr, \
+            r.stdout + r.stderr
+        e["KAGGLE_API_TOKEN"] = "tok"                             # a token alone is enough
+        r = _run(e)
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+        assert len(_calls(tmp)) == 1 and not (res / ".kaggle_upload").exists()
 
 
 if __name__ == "__main__":

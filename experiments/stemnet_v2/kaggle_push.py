@@ -204,6 +204,21 @@ def kaggle(*args, check=True):
     return r
 
 
+def check_credentials():
+    """The CLI needs KAGGLE_API_TOKEN, or KAGGLE_USERNAME and KAGGLE_KEY together; say which is missing
+    (names only, never values) before anything is staged."""
+    have = {k: bool(os.environ.get(k, "").strip()) for k in ("KAGGLE_API_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY")}
+    if (Path.home() / ".kaggle" / "access_token").exists() or (Path.home() / ".kaggle" / "kaggle.json").exists():
+        return
+    if have["KAGGLE_API_TOKEN"] or (have["KAGGLE_USERNAME"] and have["KAGGLE_KEY"]):
+        return
+    seen = ", ".join(f"{k} {'set' if v else 'MISSING'}" for k, v in have.items())
+    raise SystemExit(f"[v2-kaggle] no usable Kaggle credentials in the container ({seen}). Put in .env either\n"
+                     "    KAGGLE_API_TOKEN=<token>            (kaggle.com -> Settings -> API -> Generate New Token)\n"
+                     "or  KAGGLE_USERNAME=<name> and KAGGLE_KEY=<key>   (the legacy kaggle.json pair)\n"
+                     "nothing pushed")
+
+
 def dataset_slug():
     slug = os.environ.get("V2_KAGGLE_DATASET", "").strip()
     if slug:
@@ -228,6 +243,7 @@ def pick_files():
 def main():
     RESULTS.mkdir(parents=True, exist_ok=True)
     LOG.write_text("")
+    check_credentials()
     slug = dataset_slug()
     files = pick_files()
     check_local(files)
