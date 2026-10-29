@@ -1,5 +1,26 @@
 # carbon_polygon
 
+## Never cast georeferenced coordinates to float32 before centring
+
+The campus is in UTM: easting ~736,000 m, northing ~4,767,000 m. At those
+magnitudes float32 can only represent steps of 0.0625 m (easting) and 0.5 m
+(northing), so `utm.astype(np.float32)` silently snaps the cloud to a coarse
+grid and destroys the geometry with no error. This already happened once: a
+tree model scoring 0.95 IoU on local coordinates collapsed on the same scene in
+UTM, because Sonata was fed 0.5 m-quantised points. Full write-up:
+`FLOAT32_COORDINATE_BUG.md`.
+
+Rule: subtract a local origin first, in float64 or in the LAS raw integers,
+and cast to float32 LAST.
+- Old tracks: `experiments/common/geo.py` `center_float64()` (tests:
+  `experiments/tests/test_float32_bug.py`).
+- StemNet v2: `stemnet_v2/core.py` `Frame.local()` subtracts the origin from the
+  raw LAS integers; tiles store small frame coordinates (`frame.json` `origin_m`);
+  `stemnet_v2/model.py` `to_local()` centres each crop before float32.
+- Anything new that reads a .las/.laz, a survey, or writes UTM back: same rule.
+  Read `las.x` (float64) or the raw integers, never cast them first. When writing,
+  add the origin in float64 (as `infer.py` / `export_val.py` do).
+
 ## Survey (poderevka.csv) vs scan: the fixed shift
 
 The RTK tree survey and the campus scan are offset as a whole. In the scan's
