@@ -259,7 +259,7 @@ services:
   v2_test:
     image: carbonpoly/stemnet_v2
     environment: { DATA_DIR: /tmp/data, RESULTS_DIR: /tmp/results }
-    command: ["sh", "-c", "python /app/tests/test_stemnet_v2_measure.py && python /app/tests/test_stemnet_v2_grid.py && python /app/tests/test_stemnet_v2_features.py && python /app/tests/test_stemnet_v2_bases.py && python /app/tests/test_stemnet_v2_splits.py && python /app/tests/test_stemnet_v2_export.py && python /app/tests/test_stemnet_v2_labels.py && python /app/tests/test_stemnet_v2_semantic.py"]
+    command: ["sh", "-c", "python /app/tests/test_stemnet_v2_measure.py && python /app/tests/test_stemnet_v2_grid.py && python /app/tests/test_stemnet_v2_features.py && python /app/tests/test_stemnet_v2_bases.py && python /app/tests/test_stemnet_v2_splits.py && python /app/tests/test_stemnet_v2_export.py && python /app/tests/test_stemnet_v2_labels.py && python /app/tests/test_stemnet_v2_semantic.py && python /app/tests/test_stemnet_v2_kaggle.py"]
 
   # Prep part 1: the raw scan on Sonata's 0.02 m grid, one real point per voxel,
   # colour kept, coordinates in the shared frame. CPU only. Scratch space up to
@@ -451,6 +451,17 @@ services:
     environment: { DATA_DIR: /data, RESULTS_DIR: /results }
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/export_val.py"]
+
+  # Push result files to a PRIVATE Kaggle dataset in the .env account
+  # (default <KAGGLE_USERNAME>/carbon-polygon-results): created on the first
+  # push, a new version after. Files: V2_KAGGLE_FILES (default the val LAZ +
+  # its csv / txt). CPU. -> results/stemnet_v2_kaggle.txt (download commands)
+  v2_kaggle:
+    image: carbonpoly/stemnet_v2
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/kaggle_push.py"]
 
   # Probe, no training: frozen Sonata (+/- the 12 covariance features) on a
   # 24 m val region, k-means without labels, mapped back onto the points.

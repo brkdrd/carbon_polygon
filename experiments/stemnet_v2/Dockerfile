@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir "kaggle>=1.6"
 COPY basewalker/poderevka.csv /app/poderevka.csv
 COPY basewalker/poderevka_attributes.csv /app/poderevka_attributes.csv
 COPY stemnet_v2 /app/stemnet_v2
-COPY tests/test_stemnet_v2_measure.py tests/test_stemnet_v2_grid.py tests/test_stemnet_v2_features.py tests/test_stemnet_v2_bases.py tests/test_stemnet_v2_splits.py tests/test_stemnet_v2_export.py tests/test_stemnet_v2_labels.py tests/test_stemnet_v2_semantic.py /app/tests/
+COPY tests/test_stemnet_v2_measure.py tests/test_stemnet_v2_grid.py tests/test_stemnet_v2_features.py tests/test_stemnet_v2_bases.py tests/test_stemnet_v2_splits.py tests/test_stemnet_v2_export.py tests/test_stemnet_v2_labels.py tests/test_stemnet_v2_semantic.py tests/test_stemnet_v2_kaggle.py /app/tests/
 
 WORKDIR /app
 CMD ["python", "/app/stemnet_v2/measure.py"]
