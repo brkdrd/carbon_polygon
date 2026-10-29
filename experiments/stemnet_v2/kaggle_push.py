@@ -21,7 +21,8 @@ before anything is uploaded.
 Completeness, reported in the log:
   before    each file's size; a LAZ is opened and its point count read (a
             truncated or unreadable LAZ stops the push)
-  during    the Kaggle CLI's own upload progress, live
+  during    a progress line every 2 s: percentage of the file sent, MB, speed,
+            time left (read from how far the upload has read the file)
   after     waits (up to V2_KAGGLE_WAIT_MIN, 30 min) until Kaggle says the dataset
             is ready, then lists the files Kaggle holds and compares every
             name and byte size with the local file: COMPLETE, or INCOMPLETE
@@ -47,6 +48,7 @@ from core import RESULTS  # noqa: E402
 FILES = [f.strip() for f in os.environ.get("V2_KAGGLE_FILES", "stemnet_v2_val.laz").split(",") if f.strip()]
 WAIT_MIN = float(os.environ.get("V2_KAGGLE_WAIT_MIN", "30"))
 POLL_S = float(os.environ.get("V2_KAGGLE_POLL_S", "20"))
+PROGRESS_S = float(os.environ.get("V2_KAGGLE_PROGRESS_S", "2"))
 PUBLIC = os.environ.get("V2_KAGGLE_PUBLIC", "0") == "1"
 DELETE_OLD = os.environ.get("V2_KAGGLE_DELETE_OLD", "0") == "1"
 LOG = RESULTS / "stemnet_v2_kaggle.txt"
@@ -59,15 +61,88 @@ def log(msg):
         f.write(line + "\n")
 
 
-def kaggle_live(*args):
-    """Run the CLI with its output (upload progress) shown as it comes."""
-    pr = subprocess.Popen(["kaggle", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+def _procs(root):
+    """root and all its descendants (the CLI may hand the upload to a child)."""
+    kids, out = {}, [root]
+    for d in Path("/proc").iterdir():
+        if d.name.isdigit():
+            try:
+                kids.setdefault(int((d / "stat").read_text().rsplit(")", 1)[1].split()[1]), []).append(int(d.name))
+            except (OSError, IndexError, ValueError):
+                pass
+    for q in out:
+        out.extend(kids.get(q, []))
+    return out
+
+
+def _read_pos(pid, targets):
+    """How far each upload file has been read: {path: byte offset}, from /proc/<pid>/fdinfo."""
+    pos = {}
+    for q in _procs(pid):
+        fd_dir = Path(f"/proc/{q}/fd")
+        try:
+            fds = list(fd_dir.iterdir())
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                tgt = os.readlink(fd)
+                if tgt in targets:
+                    info = Path(f"/proc/{q}/fdinfo/{fd.name}").read_text()
+                    pos[tgt] = max(pos.get(tgt, 0), int(info.split("pos:")[1].split()[0]))
+            except (OSError, IndexError, ValueError):
+                pass
+    return pos
+
+
+def kaggle_live(files, *args):
+    """Run the CLI and show the upload's progress: every PROGRESS_S seconds, how
+    far it has read each file (the upload streams the file, so this is how much
+    has gone out), as a percentage, MB, speed and time left. Works whatever the
+    CLI itself prints; its own messages are passed through too."""
+    import threading
+    targets = {os.path.realpath(p): p for p in files}
+    total = sum(p.stat().st_size for p in files)
+    pr = subprocess.Popen(["kaggle", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     tail = []
-    for line in pr.stdout:
-        print(line, end="", flush=True)
-        tail = (tail + [line])[-40:]
-    if pr.wait() != 0:
-        raise SystemExit(f"[v2-kaggle] `kaggle {' '.join(args[:2])}` failed (exit {pr.returncode}):\n" + "".join(tail[-10:]))
+
+    def reader():                                      # the CLI's own text, minus its \r progress frames
+        buf = b""
+        for chunk in iter(lambda: pr.stdout.read(4096), b""):
+            buf += chunk
+            *lines, buf = buf.replace(b"\r", b"\n").split(b"\n")
+            for ln in lines:
+                t = ln.decode(errors="replace").strip()
+                if t and "%|" not in t:
+                    tail.append(t)
+                    print(f"  kaggle: {t}", flush=True)
+    th = threading.Thread(target=reader, daemon=True)
+    th.start()
+    tty, t0, last_logged, done = sys.stdout.isatty(), time.time(), -10.0, {}
+    while pr.poll() is None:
+        for path, off in _read_pos(pr.pid, targets).items():
+            done[path] = max(done.get(path, 0), off)
+        sent = min(sum(done.values()), total)
+        pct = sent / max(total, 1) * 100
+        el = time.time() - t0
+        rate = sent / max(el, 1e-9)
+        line = (f"uploading: {pct:5.1f}%  {sent / 2**20:,.1f} / {total / 2**20:,.1f} MB  "
+                f"{rate / 2**20:.1f} MB/s  " + (f"~{(total - sent) / rate / 60:.1f} min left" if rate > 0 and sent else ""))
+        if tty:
+            print("\r[v2-kaggle] " + line.ljust(78), end="", flush=True)
+        if pct - last_logged >= 10 or (not tty and pct - last_logged >= 5):
+            last_logged = pct - pct % 5
+            with open(LOG, "a") as f:
+                f.write(f"[v2-kaggle] {line}\n")
+            if not tty:
+                print(f"[v2-kaggle] {line}", flush=True)
+        time.sleep(PROGRESS_S)
+    th.join(timeout=5)
+    if tty:
+        print()
+    if pr.returncode != 0:
+        raise SystemExit(f"[v2-kaggle] `kaggle {' '.join(args[:2])}` failed (exit {pr.returncode}):\n" + "\n".join(tail[-10:]))
+    log(f"uploading: 100.0%  {total / 2**20:,.1f} MB sent in {(time.time() - t0) / 60:.1f} min")
 
 
 def check_local(files):
@@ -184,10 +259,10 @@ def main():
         t0 = time.time()
         if exists:
             log(f"{slug} exists — uploading a new version")
-            kaggle_live("datasets", "version", "-p", str(stage), "-m", msg, "-t", "-r", "skip", *(["-d"] if DELETE_OLD else []))
+            kaggle_live([stage / p.name for p in files], "datasets", "version", "-p", str(stage), "-m", msg, "-t", "-r", "skip", *(["-d"] if DELETE_OLD else []))
         else:
             log(f"{slug} does not exist yet — creating it")
-            kaggle_live("datasets", "create", "-p", str(stage), "-t", "-r", "skip", *(["-u"] if PUBLIC else []))
+            kaggle_live([stage / p.name for p in files], "datasets", "create", "-p", str(stage), "-t", "-r", "skip", *(["-u"] if PUBLIC else []))
         log(f"uploaded in {(time.time() - t0) / 60:.1f} min")
     finally:
         shutil.rmtree(stage, ignore_errors=True)

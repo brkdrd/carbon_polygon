@@ -43,7 +43,14 @@ if a[:2] in (["datasets", "create"], ["datasets", "version"]):
     sizes = {{p.name: p.stat().st_size for p in d.iterdir()}}
     with open(rec, "a") as f:
         f.write(json.dumps(dict(cmd=a[1], args=a, files=files, meta=meta, sizes=sizes)) + "\\n")
-    print("Uploading stemnet_v2_val.laz: 100%")
+    import time
+    for q in sorted(d.iterdir()):                                 # stream every file, slowly, like an upload
+        if q.suffix == ".laz":
+            with open(q, "rb", buffering=0) as fh:
+                n = q.stat().st_size
+                while fh.read(max(n // 6, 1)):
+                    time.sleep(0.25)
+    print("Uploading stemnet_v2_val.laz: 100%|#####| 15k/15k\\rUpload successful: stemnet_v2_val.laz")
     state.write_text(json.dumps(dict(polls=1, sizes={{k: v for k, v in sizes.items() if k != "dataset-metadata.json"}})))
     sys.exit(0)
 sys.exit(2)
@@ -55,7 +62,7 @@ def _env(tmp, **extra):
     k = b / "kaggle"; k.write_text(FAKE.format(py=sys.executable)); k.chmod(0o755)
     env = dict(os.environ, DATA_DIR=str(tmp / "data"), RESULTS_DIR=str(tmp / "res"), KAGGLE_USERNAME="someone",
                KAGGLE_KEY="k", PATH=f"{b}{os.pathsep}{os.environ['PATH']}", FAKE_KAGGLE_LOG=str(tmp / "calls.jsonl"),
-               FAKE_KAGGLE_STATE=str(tmp / "state.json"), V2_KAGGLE_POLL_S="0")
+               FAKE_KAGGLE_STATE=str(tmp / "state.json"), V2_KAGGLE_POLL_S="0", V2_KAGGLE_PROGRESS_S="0.05")
     env.pop("V2_KAGGLE_DATASET", None)
     env.update(extra)
     return env
@@ -65,7 +72,7 @@ def _run(env):
     return subprocess.run([sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True)
 
 
-def _laz(path, n=500):
+def _laz(path, n=40000):
     import laspy
     import numpy as np
     las = laspy.LasData(laspy.LasHeader(point_format=7, version="1.4"))
@@ -92,7 +99,10 @@ def test_create_then_version_with_exactly_the_chosen_files():
         assert c[0]["files"] == ["dataset-metadata.json", "stemnet_v2_val.laz"], c[0]["files"]      # only the LAZ
         assert c[0]["meta"]["id"] == "someone/carbon-polygon-results" and c[0]["sizes"]["stemnet_v2_val.laz"] == size
         log = (res / "stemnet_v2_kaggle.txt").read_text()
-        assert "500 points" in log and "Uploading stemnet_v2_val.laz: 100%" in r.stdout, log + r.stdout[-1000:]
+        assert "40,000 points" in log and "kaggle: Upload successful" in r.stdout, log + r.stdout[-1000:]
+        pcts = [float(l.split("uploading:")[1].split("%")[0]) for l in log.splitlines() if "uploading:" in l]
+        assert any(0 < x < 100 for x in pcts) and pcts[-1] == 100.0, pcts               # a percentage while it runs
+        assert "MB/s" in log and "min left" in log, log
         assert "processing (pending)" in log and "dataset ready" in log, log
         assert f"on Kaggle: stemnet_v2_val.laz {size:,} bytes = local" in log and "COMPLETE: all 1 file(s)" in log, log
         assert not (res / ".kaggle_upload").exists() and (res / "stemnet_v2_val.laz").exists()
