@@ -8,8 +8,12 @@ the gate threshold with the best AP@0.5 against the survey, then the
 vote-mass cut with the best F1 on that curve.
 
 Outputs:
-  results/stemnet_v2_val_points.laz   every grid point of the val square, UTM
-      x / y / z and scan RGB, plus
+  results/stemnet_v2_val.laz   ONE file: every grid point of the val square
+      (UTM x / y / z, scan RGB) followed by a vertical post of points for every
+      base, 3 m tall from the lowest scan point within ~0.3 m.
+      marker (also the LAS classification): 0 scan point, 1 base-only detection
+      post (blue), 2 base + tree detection post (red), 3 survey base post (yellow)
+      scan points:
         gate_base_only, gate_base_tree   "close to a tree base" probability, per model
         vote_base_only, vote_base_tree   id of the detected base this point's vote
                                          landed on (within 0.15 m of it), -1 none:
@@ -20,12 +24,9 @@ Outputs:
         tree_vs_b24                      0 tree agree, 1 non-tree agree, 2 said tree /
                                          B24 non-tree, 3 said non-tree / B24 tree,
                                          4 no B24 label
-  results/stemnet_v2_val_bases.laz    one vertical post of points per base, 3 m
-      tall from the lowest scan point within ~0.3 m, classification:
-        1 base-only detection, 2 base + tree detection, 3 survey base
-      extra: base_id (the vote_* id, or the survey base), vote_mass, matched
-      (detection: matched to a survey base at 0.5 m; survey base: bit 1 found
-      by base-only, bit 2 found by base + tree)
+      posts: base_id (the vote_* id of a detection, or the survey base), vote_mass,
+        matched (detection: 1 if matched to a survey base at 0.5 m; survey base:
+        1 found by base-only, 2 by base + tree, 3 by both, 0 by neither)
   results/stemnet_v2_val_bases.csv    the same bases as a table
   results/stemnet_v2_val_laz.txt      settings and counts
 Models: V2_EXPORT_CKPTS (default head_best,head_tree_best).
@@ -50,7 +51,8 @@ GRID_DIR = OUT / f"grid{GRID:g}"
 CKPTS = [c.strip().replace(".pth", "") for c in os.environ.get("V2_EXPORT_CKPTS", "head_best,head_tree_best").split(",")
          if c.strip()]
 SEP = float(os.environ.get("V2_CURVE_SEP", "0.3"))
-POST_H, POST_STEP = 3.0, 0.02
+POST_H, POST_STEP = 3.0, 0.01
+POST_RGB = np.array([[0, 0, 0], [0, 90, 255], [255, 0, 0], [255, 220, 0]], np.uint8)   # by marker
 LOG = RESULTS / "stemnet_v2_val_laz.txt"
 
 
@@ -213,18 +215,6 @@ def main():
     rgb, joined = grid_rgb(ref["xy"], ref["z"])
     log(f"scan RGB joined for {joined.sum():,} of {len(joined):,} points ({joined.mean() * 100:.2f}%)")
 
-    hdr = header(origin, [(k, v.dtype) for k, v in fields.items()])
-    las = laspy.LasData(hdr)
-    las.x = ref["xy"][:, 0].astype(np.float64) + origin[0]
-    las.y = ref["xy"][:, 1].astype(np.float64) + origin[1]
-    las.z = ref["z"].astype(np.float64) + origin[2]
-    cc = rgb.astype(np.uint16) * 257
-    las.red, las.green, las.blue = cc[:, 0], cc[:, 1], cc[:, 2]
-    for k, v in fields.items():
-        las[k] = v
-    las.write(str(RESULTS / "stemnet_v2_val_points.laz"))
-    log(f"-> results/stemnet_v2_val_points.laz: {len(ka):,} points, fields {', '.join(fields)}")
-
     # bases as posts
     cell = 0.25                                        # lowest scan point per 25 cm cell -> post foot
     c0 = ref["xy"].min(0).astype(np.float64)
@@ -235,23 +225,22 @@ def main():
     zmin = zmin.reshape(ny, nx)
     posts, table = [], []
 
-    def post(x, y, cls, bid, mass, matched):
+    def post(x, y, kind, bid, mass, matched):
         i, j = int(np.floor((x - c0[0]) / cell)), int(np.floor((y - c0[1]) / cell))
         win = zmin[max(j - 1, 0):j + 2, max(i - 1, 0):i + 2]
         z0 = float(win.min()) if win.size and np.isfinite(win).any() else float(np.median(ref["z"]))
         zz = np.arange(0.0, POST_H + 1e-9, POST_STEP) + z0
-        posts.append(np.column_stack([np.full(len(zz), x), np.full(len(zz), y), zz, np.full(len(zz), cls),
+        posts.append(np.column_stack([np.full(len(zz), x), np.full(len(zz), y), zz, np.full(len(zz), kind),
                                       np.full(len(zz), bid), np.full(len(zz), mass), np.full(len(zz), matched)]))
 
     found = np.zeros(len(gxy), np.int64)
     for k, (name, R, ch) in enumerate(models):
-        cls = 2 if R["has_tree"] else 1
-        bit = 2 if R["has_tree"] else 1
+        kind = 2 if R["has_tree"] else 1
         for i, ((x, y), s_, nv) in enumerate(zip(ch["det"], ch["score"], ch["votes"])):
             pr = int(ch["pair"][i])
-            post(x, y, cls, i, s_, int(pr >= 0))
+            post(x, y, kind, i, s_, int(pr >= 0))
             if pr >= 0:
-                found[pr] |= bit
+                found[pr] |= kind
             table.append([R["label"], i, f"{x:.3f}", f"{y:.3f}", f"{x + origin[0]:.3f}", f"{y + origin[1]:.3f}", f"{s_:.2f}",
                           int(nv), int(gid[pr]) if pr >= 0 else pr])
     for j, (x, y) in enumerate(gxy):
@@ -259,24 +248,37 @@ def main():
         table.append(["survey", int(gid[j]), f"{x:.3f}", f"{y:.3f}", f"{x + origin[0]:.3f}", f"{y + origin[1]:.3f}", "", "",
                       int(found[j])])
     P = np.concatenate(posts) if posts else np.zeros((0, 7))
-    hdr = header(origin, [("base_id", np.int32), ("vote_mass", np.float32), ("matched", np.uint8)])
+
+    # one file: the scan points, then the posts; a post carries no prediction (gate 0, vote -1, ...)
+    n, m = len(ka), len(P)
+    out = {}
+    for k, v in fields.items():
+        fill = -1 if k.startswith("vote_") or k == "label_tree" else (4 if k == "tree_vs_b24" else 0)
+        out[k] = np.concatenate([v, np.full(m, fill, v.dtype)])
+    out["marker"] = np.concatenate([np.zeros(n, np.uint8), P[:, 3].astype(np.uint8)])
+    out["base_id"] = np.concatenate([np.full(n, -1, np.int32), P[:, 4].astype(np.int32)])
+    out["vote_mass"] = np.concatenate([np.zeros(n, np.float32), P[:, 5].astype(np.float32)])
+    out["matched"] = np.concatenate([np.zeros(n, np.uint8), P[:, 6].astype(np.uint8)])
+    hdr = header(origin, [(k, v.dtype) for k, v in out.items()])
     las = laspy.LasData(hdr)
-    las.x, las.y, las.z = P[:, 0] + origin[0], P[:, 1] + origin[1], P[:, 2] + origin[2]
-    las.classification = P[:, 3].astype(np.uint8)
-    las.base_id = P[:, 4].astype(np.int32)
-    las.vote_mass = P[:, 5].astype(np.float32)
-    las.matched = P[:, 6].astype(np.uint8)
-    las.write(str(RESULTS / "stemnet_v2_val_bases.laz"))
+    las.x = np.r_[ref["xy"][:, 0].astype(np.float64), P[:, 0]] + origin[0]
+    las.y = np.r_[ref["xy"][:, 1].astype(np.float64), P[:, 1]] + origin[1]
+    las.z = np.r_[ref["z"].astype(np.float64), P[:, 2]] + origin[2]
+    cc = np.r_[rgb, POST_RGB[P[:, 3].astype(np.int64)]].astype(np.uint16) * 257
+    las.red, las.green, las.blue = cc[:, 0], cc[:, 1], cc[:, 2]
+    las.classification = out["marker"]
+    for k, v in out.items():
+        las[k] = v
+    las.write(str(RESULTS / "stemnet_v2_val.laz"))
     with open(RESULTS / "stemnet_v2_val_bases.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["kind", "id", "x", "y", "utm_x", "utm_y", "vote_mass", "votes",
                     "matched survey base (detections; -1 false, -2 outside val) / found by bit 1 base-only, bit 2 base+tree (survey)"])
         w.writerows(table)
-    log(f"-> results/stemnet_v2_val_bases.laz (+ .csv): {len(gxy)} survey bases "
-        f"(found by both {int((found == 3).sum())}, base-only only {int((found == 1).sum())}, "
-        f"base+tree only {int((found == 2).sum())}, neither {int((found == 0).sum())}) | "
-        "classification 1 base-only, 2 base+tree, 3 survey")
-
+    log(f"-> results/stemnet_v2_val.laz: {n:,} scan points + {m:,} post points "
+        f"({sum(len(ch['det']) for _, _, ch in models)} detected + {len(gxy)} survey bases) | fields {', '.join(out)}")
+    log(f"   survey bases found by both models {int((found == 3).sum())}, base-only only {int((found == 1).sum())}, "
+        f"base+tree only {int((found == 2).sum())}, neither {int((found == 0).sum())}")
 
 if __name__ == "__main__":
     main()

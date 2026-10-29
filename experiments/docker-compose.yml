@@ -444,7 +444,7 @@ services:
   # The val square as LAZ from the val predictions v2_compare saved (CPU, no
   # model run): both models' gate probabilities and votes, the tree output,
   # B24's label; plus every detected / surveyed base as a 3 m post.
-  # -> results/stemnet_v2_val_points.laz, stemnet_v2_val_bases.laz / .csv
+  # -> results/stemnet_v2_val.laz (scan points + base posts in one file), stemnet_v2_val_bases.csv
   v2_val_laz:
     image: carbonpoly/stemnet_v2
     env_file: [.env]
