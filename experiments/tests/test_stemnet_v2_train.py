@@ -66,7 +66,7 @@ def _with_env(env):
     for k, v in env.items():
         os.environ[k] = v
     sys.path.insert(0, str(V2))
-    for m in ("core", "data", "model", "vote", "train", "infer", "validate"):
+    for m in ("core", "data", "model", "vote", "train", "infer", "validate", "detr", "curves"):
         sys.modules.pop(m, None)
 
 
@@ -417,6 +417,79 @@ def test_detection_curve_equals_rematching_at_every_threshold():
     assert abs(C.ap(perfect) - 1.0) < 1e-9
     worse = C.curve(np.r_[gt + 5.0, gt], np.r_[np.full(len(gt), 9.0), np.full(len(gt), 1.0)], gt, 0.5)
     assert C.ap(worse) < 0.6 and abs(worse["tp"][-1] / len(gt) - 1.0) < 1e-9
+
+
+def test_detr_region_keeps_every_base_once():
+    """A perfect set predictor (every base in the crop, plus a weaker duplicate
+    5 cm off) through the 4 m ownership grid and NMS: every base exactly once."""
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        _with_env(env)
+        import data as D, detr as R, vote as V
+        store = D.TileStore()
+
+        def oracle(c, centre):
+            m = (np.abs(pos[:, 0] - centre[0]) <= R.HALF) & (np.abs(pos[:, 1] - centre[1]) <= R.HALF)
+            b = pos[m]
+            return np.r_[b, b + 0.05], np.r_[np.full(len(b), 0.9), np.full(len(b), 0.4)]
+        det, sc = R.predict_region(oracle, store, (0.0, W, 0.0, W), 300000, np.random.default_rng(0))
+        m = V.match(det, sc, pos, 0.1)
+        assert m["recall"] == 1.0 and m["precision"] == 1.0 and len(det) == len(pos), (len(det), len(pos), m["tp"])
+
+
+def test_detr_set_loss_fits_one_crop():
+    """The head and its Hungarian loss can learn one crop: one confident query per
+    base, at the base, and no confident extras."""
+    import torch
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        _with_env(env)
+        import data as D, detr as R, model as M, train as T
+        from scipy.spatial import cKDTree
+        torch.manual_seed(0)
+        store = D.TileStore()
+        centre = np.array([10.0, 10.0])
+        c = store.crop(*centre, R.CROP)
+        f = T.Runner(M.FakeEncoder(), None, np.zeros(12, np.float32), np.ones(12, np.float32), "cpu").inputs(c)
+        vf, vp = R.voxelise(f, c["xyz"], centre)
+        b = R.crop_bases(cKDTree(pos), pos, *centre)
+        gt = torch.tensor((b - centre) / R.HALF, dtype=torch.float32)
+        head = R.DetrHead(f.shape[1], d=64, n_query=16, layers=2, heads=4, ff=128)
+        opt = torch.optim.AdamW(head.parameters(), lr=2e-3)
+        first = None
+        for i in range(400):
+            loss, st = R.set_loss(head(vf, vp), gt)
+            first = first if first is not None else float(loss)
+            opt.zero_grad(); loss.backward(); opt.step()
+        logits, ref = head(vf, vp)[-1]
+        p = torch.sigmoid(logits).detach().numpy(); xy = ref.detach().numpy() * R.HALF + centre
+        conf = xy[p >= 0.5]
+        assert len(b) >= 2 and float(loss) < 0.2 * first, (len(b), first, float(loss))
+        assert len(conf) == len(b), (len(conf), len(b), np.round(p, 2))
+        d = np.linalg.norm(conf[:, None] - b[None], axis=2)
+        assert d.min(0).max() < 0.15 and d.min(1).max() < 0.15, d
+
+
+def test_train_detr_runs_evaluates_saves_and_resumes():
+    import torch
+    with tempfile.TemporaryDirectory() as t:
+        env, pos, rad = _build(Path(t))
+        env.update(V2_ENCODER="fake", V2_DEVICE="cpu", V2_DETR_STEPS="12", V2_EVAL_EVERY="6", V2_ACCUM="1",
+                   V2_CAP="40000", V2_PROGRESS_S="0", V2_DETR_D="64", V2_DETR_LAYERS="2", V2_DETR_QUERIES="16",
+                   V2_DETR_WARMUP="4")
+        r = subprocess.run([sys.executable, str(V2 / "train_detr.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+        res, models = Path(t) / "res", Path(t) / "data" / "stemnet_v2" / "models"
+        log = (res / "stemnet_v2_train_detr.txt").read_text()
+        assert log.count("EVAL step") == 2 and "done: 12 steps" in log and "AP@0.5" in log, log[-2000:]
+        assert "position error" in log and "non-finite" not in log, log[-2000:]
+        ck = torch.load(models / "detr_last.pth", weights_only=False)
+        assert ck["task"] == "detr" and ck["step"] == 12 and (models / "detr_best.pth").exists()
+        assert (res / "59_stemnet_v2_val_detr.png").exists() and (res / "stemnet_v2_val_detections_detr.csv").exists()
+        assert not (models / "head_last.pth").exists()                     # the other heads' files untouched
+        env["V2_DETR_STEPS"] = "14"
+        r = subprocess.run([sys.executable, str(V2 / "train_detr.py")], env=env, capture_output=True, text=True)
+        assert r.returncode == 0 and "resuming from step 12" in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
 
 
 def test_kmeans_recovers_separated_blobs():

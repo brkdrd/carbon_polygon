@@ -171,6 +171,7 @@ v2_curves() { log "StemNet v2 — detection curves: precision-recall / AP and FR
 v2_compare() { log "StemNet v2 — base-only vs base+tree against the survey, every threshold -> spreadsheet (GPU)"; $RUN v2_compare; }
 v2_val_laz() { log "StemNet v2 — val square as LAZ with both models' predictions + base posts (CPU)"; $RUN v2_val_laz; }
 v2_kaggle() { log "StemNet v2 — push result files (default the val LAZ) to a private Kaggle dataset (CPU)"; $RUN v2_kaggle; }
+v2_train_detr() { log "StemNet v2 — train the DETR-style head (set prediction, Hungarian matching) on frozen Sonata + features (GPU)"; $RUN v2_train_detr; }
 v2_segment() { log "StemNet v2 — probe: frozen Sonata +/- features, k-means, no labels (GPU)"; $RUN v2_segment; }
 sc_build() { log "Building sonata_cluster image (on the sonata image)"
              $DC build sonata; $DC build sc_build; }
@@ -255,6 +256,7 @@ case "${1:-all}" in
   v2_compare) v2_train_build; v2_train_test; v2_compare ;;
   v2_val_laz) v2_build; v2_val_laz ;;
   v2_kaggle) v2_build; v2_kaggle ;;
+  v2_train_detr) v2_build; v2_cache; v2_train_build; v2_train_test; v2_train_detr ;;
   v2_val_kaggle) v2_build; v2_val_laz; v2_kaggle ;;
   sc_test) sc_build; sc_test ;;
   cluster) sc_build; sc_test; sc_run ;;
@@ -266,5 +268,5 @@ basewalker|bw_prep|bw_train|bw_infer|bw_render|\
 geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|\
 gw_diag|\
 gw_height|gw_head|\
-stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|v2_semantic|v2_train_tree|v2_validate|v2_infer|v2_eval|v2_inspect|v2_curves|v2_compare|v2_val_laz|v2_kaggle|v2_val_kaggle|cluster|cluster_tile|cluster_geom|sc_test]"; exit 2 ;;
+stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|v2_semantic|v2_train_tree|v2_validate|v2_infer|v2_eval|v2_inspect|v2_curves|v2_compare|v2_val_laz|v2_kaggle|v2_val_kaggle|v2_train_detr|cluster|cluster_tile|cluster_geom|sc_test]"; exit 2 ;;
 esac

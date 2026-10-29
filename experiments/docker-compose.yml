@@ -465,6 +465,18 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/kaggle_push.py"]
 
+  # DETR-style head on frozen Sonata + the 12 features: 0.25 m voxel memory,
+  # 49 queries, 6 decoder layers, Hungarian matching to the survey bases,
+  # 50,000 steps, val AP every 5,000. Own checkpoints (detr_*.pth) and log
+  # (stemnet_v2_train_detr.txt); resumes from detr_last.pth.
+  v2_train_detr:
+    <<: *gpu
+    image: carbonpoly/stemnet_v2_gpu
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results, PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/train_detr.py"]
+
   # Probe, no training: frozen Sonata (+/- the 12 covariance features) on a
   # 24 m val region, k-means without labels, mapped back onto the points.
   # GPU, a few minutes. -> results/stemnet_v2_segment.txt, 47_/48_ png, .ply
