@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CPU checks for the independent Kaggle validation adapter."""
+"""CPU checks for the independent L1W/external validation adapter."""
 from __future__ import annotations
 
 import csv
@@ -100,6 +100,29 @@ def test_external_cloud_uses_the_real_grid_and_feature_pipeline():
         assert bbox[0] == bbox[2] == 0 and occ.sum() > 0
 
 
+def test_official_l1w_download_is_cached_without_kaggle():
+    with tempfile.TemporaryDirectory() as t:
+        root = Path(t)
+        source = root / "official.L1W.laz"
+        _cloud(source, instances=True)
+        old = K.L1W_URL, K.SOURCE_ID, K.SLUG, K.DATASET, K.LOG
+        try:
+            K.L1W_URL = source.as_uri()
+            K.SOURCE_ID = K.L1W_URL
+            K.SLUG = ""
+            K.DATASET = "TreeLearn L1W"
+            K.LOG = root / "validate.log"
+            cache = root / "cache"
+            downloaded = K.download(cache)
+            target = downloaded / "L1W.laz"
+            assert target.exists() and target.read_bytes()[:4] == b"LASF"
+            marker = json.loads((cache / "download.complete.json").read_text())
+            assert marker["source"] == source.as_uri()
+            assert K.download(cache) == downloaded
+        finally:
+            K.L1W_URL, K.SOURCE_ID, K.SLUG, K.DATASET, K.LOG = old
+
+
 def test_file_selection_and_edge_band_are_explicit():
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
@@ -122,5 +145,5 @@ if __name__ == "__main__":
             except Exception as e:
                 fails += 1
                 print(f"FAIL {name}: {type(e).__name__}: {e}")
-    print(f"\n{'All' if not fails else fails} Kaggle validation test(s) {'passed' if not fails else 'FAILED'}.")
+    print(f"\n{'All' if not fails else fails} external validation test(s) {'passed' if not fails else 'FAILED'}.")
     sys.exit(1 if fails else 0)

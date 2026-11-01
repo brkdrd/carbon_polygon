@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Evaluate the trained base-only StemNet v2 head on an independent Kaggle set.
+"""Evaluate the base-only StemNet v2 head on TreeLearn's L1W benchmark.
 
-The Kaggle dataset must contain one LAS/LAZ point cloud and either:
+With no configuration, the official L1W.laz is downloaded from the TreeLearn
+dataset DOI. L1W is a mobile-laser-scanned forest with 156 manually segmented
+complete trees, non-tree points, and per-point treeID labels. An optional
+V2_EXTVAL_KAGGLE override can still supply another LAS/LAZ dataset containing:
 
 * a CSV whose name contains base, stem, tree, truth or gt and which has x/y,
   easting/northing, or lon/lat columns; or
@@ -17,8 +20,8 @@ This stage never tunes on the external data. It uses detection parameters
 previously selected for head_best.pth, when available, otherwise the repository
 defaults. A plot-edge band is excluded from both truth and detections.
 
-Configuration:
-  V2_EXTVAL_KAGGLE       required owner/dataset slug
+Configuration (all optional):
+  V2_EXTVAL_KAGGLE       override L1W with a Kaggle owner/dataset slug
   V2_EXTVAL_CLOUD        optional filename/path suffix when several clouds exist
   V2_EXTVAL_GT           optional CSV filename/path suffix
   V2_EXTVAL_EDGE         ignored edge band in metres (default 4)
@@ -26,10 +29,10 @@ Configuration:
   V2_EXTVAL_FORCE        1 downloads and prepares again
 
 Outputs:
-  results/stemnet_v2_kaggle_validate.txt
-  results/stemnet_v2_kaggle_detections.csv
-  results/60_stemnet_v2_kaggle_validate.png
-  data/kaggle_validation/<owner>__<dataset>/ download and prepared cache
+  results/stemnet_v2_l1w_validate.txt
+  results/stemnet_v2_l1w_detections.csv
+  results/60_stemnet_v2_l1w_validate.png
+  data/external_validation/l1w/ download and prepared cache
 """
 from __future__ import annotations
 
@@ -40,6 +43,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -48,24 +53,25 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core import DATA, RESULTS, TILE  # noqa: E402
 import data as D  # noqa: E402
-import infer as I  # noqa: E402
-import train as T  # noqa: E402
-import vote as V  # noqa: E402
 
 SLUG = os.environ.get("V2_EXTVAL_KAGGLE", "").strip()
+L1W_URL = ("https://data.goettingen-research-online.de/api/access/datafile/:persistentId"
+           "?persistentId=doi:10.25625/VPMPID/ZITXOQ")
+DATASET = SLUG or "TreeLearn L1W"
+SOURCE_ID = f"kaggle:{SLUG}" if SLUG else L1W_URL
 CLOUD_HINT = os.environ.get("V2_EXTVAL_CLOUD", "").strip()
 GT_HINT = os.environ.get("V2_EXTVAL_GT", "").strip()
 EDGE = float(os.environ.get("V2_EXTVAL_EDGE", "4"))
 FORCE = os.environ.get("V2_EXTVAL_FORCE", "0") != "0"
 BACKGROUND = {int(x) for x in os.environ.get("V2_EXTVAL_BACKGROUND", "-1,0").split(",") if x.strip()}
-LOG = RESULTS / "stemnet_v2_kaggle_validate.txt"
-DET_CSV = RESULTS / "stemnet_v2_kaggle_detections.csv"
-FIG = RESULTS / "60_stemnet_v2_kaggle_validate.png"
+LOG = RESULTS / "stemnet_v2_l1w_validate.txt"
+DET_CSV = RESULTS / "stemnet_v2_l1w_detections.csv"
+FIG = RESULTS / "60_stemnet_v2_l1w_validate.png"
 INSTANCE_NAMES = ("tree_id", "treeid", "instance_id", "instance")
 
 
 def log(msg):
-    line = f"[v2-kaggle-val] {msg}"
+    line = f"[v2-l1w-val] {msg}"
     print(line, flush=True)
     with open(LOG, "a") as f:
         f.write(line + "\n")
@@ -104,19 +110,53 @@ def run_kaggle(args):
     return r
 
 
+def download_official(tmp):
+    dst = tmp / "L1W.laz"
+    part = tmp / "L1W.laz.part"
+    req = urllib.request.Request(L1W_URL, headers={"User-Agent": "carbon-polygon-validation/1"})
+    log("downloading official TreeLearn L1W benchmark (DOI 10.25625/VPMPID)")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as src, open(part, "wb") as out:
+            total = int(src.headers.get("Content-Length", "0"))
+            done = 0
+            while True:
+                block = src.read(8 * 1024 * 1024)
+                if not block:
+                    break
+                out.write(block)
+                done += len(block)
+                if total:
+                    print(f"\r[v2-l1w-val] download {done / 2**30:.2f}/{total / 2**30:.2f} GiB "
+                          f"({done / total:.0%})", end="", flush=True)
+    except (OSError, urllib.error.URLError) as e:
+        part.unlink(missing_ok=True)
+        raise SystemExit(f"[v2-l1w-val] official L1W download failed: {e}") from e
+    if total:
+        print(flush=True)
+    with open(part, "rb") as f:
+        magic = f.read(4)
+    if part.stat().st_size < 4 or magic != b"LASF":
+        part.unlink(missing_ok=True)
+        raise SystemExit("[v2-l1w-val] official L1W download is not a LAS/LAZ file")
+    part.rename(dst)
+
+
 def download(root):
     done = root / "download.complete.json"
     dst = root / "download"
     if done.exists() and dst.exists() and not FORCE:
         meta = json.loads(done.read_text())
-        if meta.get("dataset") == SLUG:
+        if meta.get("source") == SOURCE_ID:
             log(f"download reused: {dst}")
             return dst
     tmp = root / ".download"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
-    log(f"downloading Kaggle dataset {SLUG}")
-    run_kaggle(["datasets", "download", SLUG, "-p", str(tmp), "--force"])
+    if SLUG:
+        log(f"downloading Kaggle override {SLUG}")
+        run_kaggle(["datasets", "download", SLUG, "-p", str(tmp), "--force"])
+    else:
+        download_official(tmp)
     for z in sorted(tmp.rglob("*.zip")):
         with zipfile.ZipFile(z) as f:
             root = z.parent.resolve()
@@ -128,11 +168,12 @@ def download(root):
     clouds = list(tmp.rglob("*.las")) + list(tmp.rglob("*.laz"))
     if not clouds:
         shutil.rmtree(tmp, ignore_errors=True)
-        raise SystemExit(f"[v2-kaggle-val] {SLUG} contains no LAS/LAZ point cloud")
+        raise SystemExit(f"[v2-l1w-val] {DATASET} contains no LAS/LAZ point cloud")
     if dst.exists():
         shutil.rmtree(dst)
     tmp.rename(dst)
-    done.write_text(json.dumps(dict(dataset=SLUG, downloaded_at=int(time.time())), indent=2))
+    done.write_text(json.dumps(dict(dataset=DATASET, source=SOURCE_ID,
+                                    downloaded_at=int(time.time())), indent=2))
     log(f"downloaded {len(clouds)} point cloud file(s) -> {dst}")
     return dst
 
@@ -303,11 +344,15 @@ def figure(gt, det, pair, bbox, title):
 
 
 def main():
-    if not SLUG:
-        raise SystemExit("[v2-kaggle-val] set V2_EXTVAL_KAGGLE=owner/dataset")
+    # Keep these GPU/training imports out of the download and truth adapters so
+    # their CPU self-check can run in the lightweight preparation image.
+    import infer as I
+    import train as T
+    import vote as V
+
     RESULTS.mkdir(parents=True, exist_ok=True)
     LOG.write_text("")
-    root = DATA / "kaggle_validation" / safe_slug(SLUG)
+    root = DATA / "external_validation" / (safe_slug(SLUG) if SLUG else "l1w")
     root.mkdir(parents=True, exist_ok=True)
     downloaded = download(root)
     cloud, gt_csv = select_files(downloaded)
@@ -358,8 +403,8 @@ def main():
             w.writerow([f"{x:.3f}", f"{y:.3f}", f"{x + origin[0]:.3f}", f"{y + origin[1]:.3f}",
                         f"{s:.4f}", int(n), ids_eval[p] if p >= 0 else ""])
     figure(truth_eval, det, a["pair"], bbox,
-           f"Base-only StemNet v2 on {SLUG} — F1 {a['f1']:.3f}, P {a['precision']:.3f}, R {a['recall']:.3f}")
-    summary = dict(dataset=SLUG, cloud=str(cloud.relative_to(downloaded)), truth=truth_source,
+           f"Base-only StemNet v2 on {DATASET} — F1 {a['f1']:.3f}, P {a['precision']:.3f}, R {a['recall']:.3f}")
+    summary = dict(dataset=DATASET, source=SOURCE_ID, cloud=str(cloud.relative_to(downloaded)), truth=truth_source,
                    checkpoint=cpath.name, checkpoint_step=int(ck["step"]), detection=params,
                    bbox=bbox, edge_m=EDGE, trees=len(truth_eval), detections=len(det),
                    at_05={k: v for k, v in a.items() if k != "pair"},

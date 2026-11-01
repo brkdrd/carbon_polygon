@@ -26,8 +26,8 @@
     .\run_experiments.ps1 stemnet        # dense chunk model: train, val, patch
                                          # patch only: per-tree and
                                          # per-species results
-    .\run_experiments.ps1 v2_validate_kaggle # independent Kaggle validation
-                                           # of the base-only model
+    .\run_experiments.ps1 v2_validate_l1w # independent L1W validation of the
+                                          # base-only model; downloads itself
     .\run_experiments.ps1 gw_infer_head  # inference, but endpoints ranked by
                                      # the gw_head classifier (both reported)
 
@@ -35,8 +35,9 @@
     powershell -ExecutionPolicy Bypass -File .\run_experiments.ps1
 
   Requires: Docker Desktop (WSL2 backend + GPU support) OR Docker Engine in WSL2
-  with the NVIDIA Container Toolkit, and Kaggle credentials in .env
-  (KAGGLE_USERNAME / KAGGLE_KEY).
+  with the NVIDIA Container Toolkit. Some training-data stages also require
+  Kaggle credentials in .env (KAGGLE_USERNAME / KAGGLE_KEY); L1W validation
+  downloads its benchmark directly and does not use them.
 #>
 param([string]$Target = "all")
 
@@ -234,8 +235,8 @@ function V2TrainTree { Log "StemNet v2 - train gate/offset + tree/non-tree, val 
     Invoke-Stage "v2_train_tree" }
 function V2Validate { Log "StemNet v2 - validate: tune detection on val, score the test patch once (GPU)"
     Invoke-Stage "v2_validate" }
-function V2ValidateKaggle { Log "StemNet v2 - independent Kaggle validation of the base-only model (GPU)"
-    Invoke-Stage "v2_validate_kaggle" }
+function V2ValidateL1W { Log "StemNet v2 - independent L1W validation of the base-only model (GPU)"
+    Invoke-Stage "v2_validate_l1w" }
 function V2Infer { Log "StemNet v2 - inference over the campus: LAZ with tree / gate probabilities + bases (GPU)"
     Invoke-Stage "v2_infer" }
 function V2Inspect { Log "StemNet v2 - inspect the inference: errors by height, surveyed trunks, close-ups (CPU)"
@@ -331,7 +332,8 @@ switch ($Target) {
     "v2_train" { V2Build; V2Cache; V2TrainBuild; V2TrainTest; V2Train }
     "v2_segment" { V2TrainBuild; V2TrainTest; V2Segment }
     "v2_validate" { V2TrainBuild; V2TrainTest; V2Validate }
-    "v2_validate_kaggle" { V2Build; V2Test; V2TrainBuild; V2TrainTest; V2ValidateKaggle }
+    "v2_validate_l1w" { V2Build; V2Test; V2TrainBuild; V2TrainTest; V2ValidateL1W }
+    "v2_validate_kaggle" { V2Build; V2Test; V2TrainBuild; V2TrainTest; V2ValidateL1W }
     "v2_infer" { V2TrainBuild; V2TrainTest; V2Infer }
     "v2_eval" { V2TrainBuild; V2TrainTest; V2Validate; V2Infer }
     "v2_inspect" { V2Build; V2Inspect }
@@ -353,7 +355,7 @@ switch ($Target) {
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|v2_semantic|v2_train_tree|v2_validate|v2_validate_kaggle|v2_infer|v2_eval|v2_inspect|v2_curves|v2_compare|v2_val_laz|v2_kaggle|v2_val_kaggle|v2_train_detr|cluster|cluster_tile|cluster_geom|sc_test]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|v2_semantic|v2_train_tree|v2_validate|v2_validate_l1w|v2_infer|v2_eval|v2_inspect|v2_curves|v2_compare|v2_val_laz|v2_kaggle|v2_val_kaggle|v2_train_detr|cluster|cluster_tile|cluster_geom|sc_test]"
         exit 2
     }
 }

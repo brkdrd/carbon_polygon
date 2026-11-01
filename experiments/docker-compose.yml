@@ -394,16 +394,16 @@ services:
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/validate.py"]
 
-  # Independent benchmark: downloads a Kaggle LAS/LAZ plus exhaustive tree
-  # bases, prepares it separately, and scores head_best.pth without tuning.
-  v2_validate_kaggle:
+  # Independent benchmark: downloads the official TreeLearn L1W mobile-LiDAR
+  # forest, derives bases from its manual treeID labels, and scores head_best.
+  v2_validate_l1w:
     <<: *gpu
     image: carbonpoly/stemnet_v2_gpu
     env_file: [.env]
     environment: { DATA_DIR: /data, RESULTS_DIR: /results,
                      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
     volumes: [ ./data:/data, ./results:/results ]
-    command: ["python", "/app/stemnet_v2/validate_kaggle.py"]
+    command: ["python", "/app/stemnet_v2/validate_l1w.py"]
 
   # The trained head over the whole campus in 50 m blocks: one LAZ per block
   # (tree_prob, pred_tree, gate_prob, B24 label, split) in

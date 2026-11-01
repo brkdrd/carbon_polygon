@@ -7,7 +7,7 @@
 FROM carbonpoly/sonata
 
 # laspy: v2_infer writes LAZ; openpyxl: v2_compare writes the spreadsheet;
-# kaggle + six: v2_validate_kaggle downloads the independent benchmark.
+# kaggle + six: optional external-validation overrides can use Kaggle.
 RUN pip install --no-cache-dir pyproj "laspy[lazrs]" openpyxl kaggle six
 
 # own directory: the base image's /app/train_head.py etc. are not ours
