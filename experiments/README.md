@@ -731,6 +731,44 @@ this), `SN_VOTE_CELL/SEP/R/MIN` (0.1 / 0.6 / 0.3 / 6.0), `SN_DETREND` (1),
 `SN_LR`, `SN_W_OFF`, `SN_EVAL` (250), `SN_EVAL_WIN` (48 windows, which is what
 best-F1 checkpointing is selected on).
 
+### Independent Kaggle validation for StemNet v2
+
+`v2_validate_kaggle` evaluates the base-only `head_best.pth` on a separate,
+exhaustively labelled point cloud. Set `V2_EXTVAL_KAGGLE=owner/dataset` in
+`.env`, then run:
+
+```bash
+./run_experiments.sh v2_validate_kaggle
+```
+
+On Windows, put the setting in `experiments\.env` and use the CMD launcher
+(which handles PowerShell execution policy):
+
+```text
+V2_EXTVAL_KAGGLE=alice/forest-validation
+```
+
+```powershell
+.\run_experiments.cmd v2_validate_kaggle
+```
+
+`alice/forest-validation` is the `owner/dataset` part of a Kaggle URL such as
+`https://www.kaggle.com/datasets/alice/forest-validation`; it is an example,
+not a real configured dataset.
+
+The dataset must contain one LAS/LAZ file and either a tree-base CSV or a
+per-point instance dimension. CSV columns may be `x,y`, `easting,northing`, or
+`lon,lat`; accepted instance names are `tree_id`, `treeID`, `instance_id`, and
+`instance`. If the archive contains several candidate files, set
+`V2_EXTVAL_CLOUD` and `V2_EXTVAL_GT` to their filename or path suffixes.
+
+The download, 2 cm grid, and covariance features are cached under
+`data/kaggle_validation/` and never replace campus training artifacts. The
+stage uses the checkpoint's already selected detection settings and does not
+tune against this dataset. It reports precision, recall, F1, and placement
+RMSE at 0.5 m, plus the stricter 0.3 m score. By default the outer 4 m are
+excluded because trees cut by the plot boundary are not judgeable.
+
 
 ## Notes & caveats
 

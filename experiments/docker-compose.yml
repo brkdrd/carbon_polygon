@@ -259,7 +259,7 @@ services:
   v2_test:
     image: carbonpoly/stemnet_v2
     environment: { DATA_DIR: /tmp/data, RESULTS_DIR: /tmp/results }
-    command: ["sh", "-c", "python /app/tests/test_stemnet_v2_measure.py && python /app/tests/test_stemnet_v2_grid.py && python /app/tests/test_stemnet_v2_features.py && python /app/tests/test_stemnet_v2_bases.py && python /app/tests/test_stemnet_v2_splits.py && python /app/tests/test_stemnet_v2_export.py && python /app/tests/test_stemnet_v2_labels.py && python /app/tests/test_stemnet_v2_semantic.py && python /app/tests/test_stemnet_v2_kaggle.py"]
+    command: ["sh", "-c", "python /app/tests/test_stemnet_v2_measure.py && python /app/tests/test_stemnet_v2_grid.py && python /app/tests/test_stemnet_v2_features.py && python /app/tests/test_stemnet_v2_bases.py && python /app/tests/test_stemnet_v2_splits.py && python /app/tests/test_stemnet_v2_export.py && python /app/tests/test_stemnet_v2_labels.py && python /app/tests/test_stemnet_v2_semantic.py && python /app/tests/test_stemnet_v2_kaggle.py && python /app/tests/test_stemnet_v2_kaggle_validate.py"]
 
   # Prep part 1: the raw scan on Sonata's 0.02 m grid, one real point per voxel,
   # colour kept, coordinates in the shared frame. CPU only. Scratch space up to
@@ -393,6 +393,17 @@ services:
     environment: { DATA_DIR: /data, RESULTS_DIR: /results, PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
     volumes: [ ./data:/data, ./results:/results ]
     command: ["python", "/app/stemnet_v2/validate.py"]
+
+  # Independent benchmark: downloads a Kaggle LAS/LAZ plus exhaustive tree
+  # bases, prepares it separately, and scores head_best.pth without tuning.
+  v2_validate_kaggle:
+    <<: *gpu
+    image: carbonpoly/stemnet_v2_gpu
+    env_file: [.env]
+    environment: { DATA_DIR: /data, RESULTS_DIR: /results,
+                     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True }
+    volumes: [ ./data:/data, ./results:/results ]
+    command: ["python", "/app/stemnet_v2/validate_kaggle.py"]
 
   # The trained head over the whole campus in 50 m blocks: one LAZ per block
   # (tree_prob, pred_tree, gate_prob, B24 label, split) in

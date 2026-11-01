@@ -42,15 +42,20 @@ F16_MAX = 65504.0
 class TileStore:
     """Grid, feature and label tiles, loaded on demand, recently used kept."""
 
-    def __init__(self, keep=96, labels=True):
+    def __init__(self, keep=96, labels=True, root=None):
         self.keep, self.labels, self.mem = keep, labels, {}
-        self.have = {tuple(int(v) for v in q.stem.split("_")[1:]) for q in GRID_DIR.glob("tile_*.npz")}
+        root = OUT if root is None else Path(root)
+        self.grid_dir = root / f"grid{GRID:g}"
+        self.feat_dir = root / f"feat{GRID:g}"
+        self.lab_dir = root / f"labels{GRID:g}"
+        self.sem_dir = root / f"sem{GRID:g}"
+        self.have = {tuple(int(v) for v in q.stem.split("_")[1:]) for q in self.grid_dir.glob("tile_*.npz")}
         if not self.have:
-            raise SystemExit(f"[v2-data] no grid tiles in {GRID_DIR} — run v2_grid")
-        if not FEAT_DIR.exists():
-            raise SystemExit(f"[v2-data] no feature tiles in {FEAT_DIR} — run v2_features")
-        if labels and not LAB_DIR.exists():
-            raise SystemExit(f"[v2-data] no label tiles in {LAB_DIR} — run v2_labels")
+            raise SystemExit(f"[v2-data] no grid tiles in {self.grid_dir} — run v2_grid")
+        if not self.feat_dir.exists():
+            raise SystemExit(f"[v2-data] no feature tiles in {self.feat_dir} — run v2_features")
+        if labels and not self.lab_dir.exists():
+            raise SystemExit(f"[v2-data] no label tiles in {self.lab_dir} — run v2_labels")
 
     def tile(self, ij):
         if ij not in self.mem:
@@ -58,17 +63,17 @@ class TileStore:
                 self.mem[ij] = None
             else:
                 name = f"tile_{ij[0]}_{ij[1]}.npz"
-                g = np.load(GRID_DIR / name)
+                g = np.load(self.grid_dir / name)
                 # sum_eig_cm2 overflows float16 (65,504 cm^2) for isolated points
                 # whose 20 neighbours spread over metres: saturate, don't feed inf
-                f = np.nan_to_num(np.load(FEAT_DIR / name)["feat"].astype(np.float32),
+                f = np.nan_to_num(np.load(self.feat_dir / name)["feat"].astype(np.float32),
                                   nan=0.0, posinf=F16_MAX, neginf=-F16_MAX)
                 t = dict(xyz=g["xyz"].astype(np.float64), feat=f,
                          normal=f[:, NORMAL_COLS].astype(np.float32))
                 if self.labels:
-                    lb = np.load(LAB_DIR / name)
+                    lb = np.load(self.lab_dir / name)
                     t.update(gate=lb["gate"].astype(np.int8), offset=lb["offset"].astype(np.float32))
-                    q = SEM_DIR / name
+                    q = self.sem_dir / name
                     t["sem"] = (np.load(q)["sem"].astype(np.int8) if q.exists()
                                 else np.full(len(t["xyz"]), -1, np.int8))
                 order = np.argsort(t["xyz"][:, 0], kind="stable")
