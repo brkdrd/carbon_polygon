@@ -731,6 +731,145 @@ this), `SN_VOTE_CELL/SEP/R/MIN` (0.1 / 0.6 / 0.3 / 6.0), `SN_DETREND` (1),
 `SN_LR`, `SN_W_OFF`, `SN_EVAL` (250), `SN_EVAL_WIN` (48 windows, which is what
 best-F1 checkpointing is selected on).
 
+## Sonata + geometry DETR: train and validate tree bases
+
+This is **one model**: the repository's frozen pretrained Sonata/PTv3 encoder,
+its dense multiscale readout (48+96+192+384+512 = 1,232 channels), the existing
+12 standardized covariance features, and a DETR set-prediction decoder. The
+Sonata input contract is unchanged: crop-local coordinates, zero RGB, normals,
+2 cm grid sampling, and its pooling-parent/inverse chain. Geometry is appended
+after the encoder, not inserted into Sonata's pretrained input layer.
+
+The default decoder uses 0.25 m voxel memory, 49 learned queries, six decoder
+layers and width 256; Hungarian matching, focal objectness and matched XY loss
+train it to return base positions plus confidence. Sonata stays frozen. There
+is no semantic-tree or trunk-diameter prediction head. Each training crop comes
+only from the training split, with a margin for centre jitter. Query overflow
+fails explicitly rather than silently dropping ground-truth bases.
+
+### GPU-box workflow
+
+Code is baked into the Docker image (`COPY stemnet_v2 /app/stemnet_v2`), not
+bind-mounted. After transferring these changes to the GPU box (normally via a
+committed branch and `git pull`), use the launchers so they rebuild Sonata and
+the v2 GPU image in the existing dependency order. Data and results remain in
+`experiments/data` and `experiments/results`; rebuilding does not remove them.
+
+On the already prepared GPU box:
+
+```bat
+cd experiments
+run_experiments.cmd v2_train_detr
+run_experiments.cmd v2_validate_detr
+```
+
+Linux / WSL equivalents:
+
+```bash
+cd experiments
+./run_experiments.sh v2_train_detr
+./run_experiments.sh v2_validate_detr
+```
+
+Training first refreshes the sorted cache if necessary. It expects the existing
+v2 `frame.json`, grid/features, `regions.npz`, `label_bases.csv` and label tiles.
+If those have not been prepared, run `v2_grid`, `v2_features`, `v2_bases`,
+`v2_splits`, `v2_labels` in that order. The campus LAZ must already be in
+`data/raw`. Validation is standalone: it does **not** invoke training or rebuild
+the data cache. It reads grid/features and corrected bases, not semantic labels.
+
+Put overrides in `experiments/.env` (these services read `env_file`; merely
+setting a host-shell variable is not a reliable override):
+
+```dotenv
+# Training defaults
+V2_ENCODER=sonata
+V2_DEVICE=cuda
+V2_DETR_STEPS=50000
+V2_DETR_LR=0.0002
+V2_DETR_WARMUP=1000
+V2_ACCUM=4
+V2_EVAL_EVERY=5000
+# Standalone validation defaults
+V2_DETR_CKPT=detr_best.pth
+V2_DETR_SPLIT=test
+# V2_DETR_THRESHOLD=0.5  # optional; otherwise use the saved VAL-selected cut
+```
+
+Training writes `data/stemnet_v2/models/detr_best.pth` and `detr_last.pth`.
+A rerun resumes the last compatible checkpoint; `V2_DETR_STEPS` is the total
+schedule target, not an additional number of steps. Saved decoder dimensions
+are restored on resume, together with NumPy/Torch random-generator states so
+sampling and augmentation continue rather than replaying the initial sequence.
+Old checkpoints lacking the new geometry/policy/RNG
+metadata are rejected for training resume: archive them first, then use
+`V2_RESUME=0` if starting a new run. Do not use `fake` for a real run; it is an
+explicitly labelled CPU-test encoder only. Checkpoints use PyTorch's existing
+pickle-based format: load only trusted local training checkpoints.
+
+### Which validation points count?
+
+The smaller attributed survey is `basewalker/poderevka_attributes.csv` (392
+rows). Its patch is called **test**, split id 2, by `prep_splits.py`; the separate
+**val** square has no girths. Training continues to select checkpoints and a
+probability cut on **all val survey bases**. The standalone command applies the
+size rule to the attributed **test** patch, without tuning anything on it.
+These two reported scores use different ground-truth definitions.
+
+**Current agreed rule: measured trunk diameter >= 10 cm. Height filtering is
+pending and is not applied.** Neither this CSV nor its source workbook contains
+tree height; `z` is survey elevation, not tree height. Reports explicitly record
+`height_filter: pending_not_applied`.
+
+- Convert circumference `girth_cm` to diameter using `girth_cm / pi`. An exact
+  10 cm diameter is included. Semicolon-separated multi-stem girths use the
+  largest stem. Ambiguous repeated-dot strings and missing/nonpositive/nonfinite
+  measurements are unknown, not guessed.
+- Join survey attributes by stable `block-n` identity (resolved from the checked
+  survey lat/lon), then follow `label_bases.csv.members` through fork merging.
+  A merged base qualifies if any member qualifies; it is counted once.
+- Always use the existing corrected `label_bases.csv` XY. Do not apply the
+  `(+0.68, +1.02)` shift again. Never use `radius=0.05` as evidence of a measured
+  10 cm diameter: that is the prep stage's fallback for unmeasured trees.
+- The filter removes **ground-truth base points**, not raw scan points. The
+  model sees the full cloud, so the evaluation does not leak tree locations.
+- A detection on a known sub-10 cm tree is a false positive for this target.
+  Unmatched detections near unknown-diameter survey bases are ignored, not
+  labelled false; duplicates near eligible bases remain false positives.
+  Outside-split detections are ignored. Counts are reported explicitly.
+- The survey is incomplete; precision is still a lower bound for unrecorded
+  trees. No eligible-tree count for the real test split can be stated until its
+  prepared `regions.npz` and corrected bases are available.
+
+For another attributed CSV, set `V2_DETR_ATTRS=/data/path/to/attributes.csv`.
+Supported diameter columns are `diameter_cm`, `dbh_cm`, or `girth_cm` (in that
+priority), with identity `id` (`block-n`), `block,n`, or `lat,lon` matching the
+source survey. No nearest-neighbour coordinate joins or guessed units are used.
+`V2_DETR_SPLIT=val` is possible only with additional measurements there; a split
+with no known diameters fails before loading the GPU encoder.
+
+### Validation outputs and tests
+
+The default validation writes:
+
+- `results/stemnet_v2_test_detr_metrics.json`: AP at 0.5/0.3 m, fixed-threshold
+  precision/recall/F1 and match counts, checkpoint settings and filter audit.
+- `results/stemnet_v2_test_detr_detections.csv`: local and UTM XY, probability,
+  match/ignore status and stable matched-base identifiers.
+- `results/stemnet_v2_test_detr_bases.csv`: eligibility audit, including excluded
+  small and unknown-diameter bases.
+
+UTM origins are added in float64 on export. Coordinates are centred before
+float32 on encoder input. Existing feature-overflow handling is retained.
+
+CPU correctness checks (test-only synthetic encoder, not evidence of campus
+accuracy or CUDA compatibility):
+
+```bash
+python -m pytest tests/test_stemnet_v2_detr_*.py -q
+python -m pytest tests/test_stemnet_v2_train.py -k detr -q
+```
+
 ### Independent L1W validation for StemNet v2
 
 `v2_validate_l1w` evaluates the base-only `head_best.pth` on TreeLearn's

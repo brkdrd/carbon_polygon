@@ -118,7 +118,8 @@ def voxelise(f, xyz, centre):
     pos = torch.zeros(n, 3, device=f.device).index_add_(0, inv, rel)
     feat, pos = s / cnt[:, None], pos / cnt[:, None]
     if n > MAX_TOKENS:
-        keep = torch.randperm(n, device=f.device)[:MAX_TOKENS]
+        # Evenly sample the sorted voxel keys; never consume the training RNG.
+        keep = torch.div(torch.arange(MAX_TOKENS, device=f.device) * n, MAX_TOKENS, rounding_mode="floor")
         feat, pos = feat[keep], pos[keep]
     return feat, pos / torch.tensor([HALF, HALF, 10.0], device=f.device)
 
@@ -135,6 +136,8 @@ def set_loss(outs, gt):
     from scipy.optimize import linear_sum_assignment
     total, n = 0.0, max(len(gt), 1)
     for logits, ref in outs:
+        if len(gt) > len(logits):
+            raise ValueError(f"{len(gt)} targets exceed {len(logits)} queries")
         target = torch.zeros_like(logits)
         if len(gt):
             cost = -W_CLS * torch.sigmoid(logits)[:, None] + W_XY * torch.cdist(ref, gt, p=1)

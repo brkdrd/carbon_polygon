@@ -17,10 +17,9 @@ v2_curves / v2_compare score: ranked by probability, matched one-to-one at
 0.5 m and 0.3 m -> AP@0.5, AP@0.3, maximum recall, and the best F1 on the val
 curve with its probability cut. The best AP@0.5 is kept.
 
-Non-finite guards as v2_train: a crop whose inputs or loss are not finite is
-skipped, a step whose gradient is not finite is not applied, non-finite
-weights are never saved, a resume whose latest state is not finite falls back
-to the best one. Resumes from detr_last.pth (V2_RESUME=0 starts over).
+Non-finite guards: invalid crops and gradients are skipped; invalid inference,
+optimizer state, or checkpoint policy fails closed. Resumes from detr_last.pth
+(V2_RESUME=0 starts over).
 
 Outputs:
   data/stemnet_v2/models/detr_best.pth, detr_last.pth
@@ -79,21 +78,36 @@ class DetrRunner:
         self.head, self.dev = head, dev
 
     def outs(self, c, centre):
+        if (not np.isfinite(centre).all() or any(not np.isfinite(c[k]).all()
+                for k in ("xyz", "feat", "normal") if k in c)):
+            return None
         f = self.feat.inputs(c)
         if not bool(torch.isfinite(f).all()):
             return None
         vf, vp = R.voxelise(f, c["xyz"], centre)
-        return self.head(vf, vp)
+        outs = self.head(vf, vp)
+        if any(not bool(torch.isfinite(t).all()) for pair in outs for t in pair):
+            return None
+        return outs
 
     @torch.no_grad()
     def predict(self, c, centre):
+        was_training = self.head.training
         self.head.eval()
-        o = self.outs(c, centre)
-        self.head.train()
-        if o is None:
-            return np.zeros((0, 2)), np.zeros(0)
-        logits, ref = o[-1]
-        return centre + ref.float().cpu().numpy() * R.HALF, torch.sigmoid(logits).float().cpu().numpy()
+        try:
+            o = self.outs(c, centre)
+            if o is None:
+                raise ValueError("non-finite DETR inputs or head outputs")
+            logits, ref = o[-1]
+            if not bool(torch.isfinite(logits).all() and torch.isfinite(ref).all()):
+                raise ValueError("non-finite DETR predictions")
+            xy = centre + ref.float().cpu().numpy() * R.HALF
+            score = torch.sigmoid(logits).float().cpu().numpy()
+            if not np.isfinite(xy).all() or not np.isfinite(score).all():
+                raise ValueError("non-finite DETR predictions")
+            return xy, score
+        finally:
+            self.head.train(was_training)
 
 
 def evaluate(runner, store, gt, bbox, split, rng):
@@ -114,14 +128,70 @@ def evaluate(runner, store, gt, bbox, split, rng):
     return ev, det, sc, ign
 
 
-def save(path, head, opt, step, best, mu, sd, ev):
-    if not T.finite(head):
-        log(f"  NOT saving {path.name} at step {step}: weights are not finite")
+def finite_state(x):
+    if isinstance(x, torch.Tensor):
+        return bool(torch.isfinite(x).all())
+    if isinstance(x, dict):
+        return all(finite_state(v) for v in x.values())
+    if isinstance(x, (list, tuple)):
+        return all(finite_state(v) for v in x)
+    if isinstance(x, (float, np.floating)):
+        return bool(np.isfinite(x))
+    return True
+
+
+def validate_resume(ck, audit):
+    expected = dict(crop=R.CROP, own=R.OWN, voxel=R.VOXEL,
+                    max_tokens=R.MAX_TOKENS, cap=CAP, encoder=T.ENCODER,
+                    nms_r=R.NMS_R, min_p=R.MIN_P, grid=M.GRID, seed=T.SEED)
+    cfg = ck.get("cfg", {})
+    if (ck.get("validation_filter") is None or ck["validation_filter"] != audit
+            or not isinstance(ck.get("hcfg"), dict) or not isinstance(ck.get("d_in"), int)
+            or any(cfg.get(k) != v for k, v in expected.items())
+            or not isinstance(ck.get("rng"), dict)
+            or not isinstance(ck["rng"].get("numpy"), dict)
+            or not isinstance(ck["rng"].get("torch"), torch.Tensor)
+            or "cuda" not in ck["rng"]
+            or "opt" not in ck or not finite_state(ck["opt"])):
+        raise ValueError("checkpoint policy, geometry, encoder or optimizer mismatch/non-finite; start fresh with V2_RESUME=0")
+
+
+def restore_rng(ck, rng):
+    state = ck["rng"]
+    rng.bit_generator.state = state["numpy"]
+    torch.set_rng_state(state["torch"].cpu())
+    if state["cuda"] is not None:
+        if not torch.cuda.is_available() or len(state["cuda"]) != torch.cuda.device_count():
+            raise ValueError("checkpoint CUDA RNG devices mismatch; start fresh with V2_RESUME=0")
+        torch.cuda.set_rng_state_all([s.cpu() for s in state["cuda"]])
+    elif T.DEVICE.startswith("cuda"):
+        raise ValueError("checkpoint missing CUDA RNG state; start fresh with V2_RESUME=0")
+
+
+def save(path, head, opt, step, best, mu, sd, ev, rng=None):
+    if not T.finite(head) or not finite_state(opt.state_dict()):
+        log(f"  NOT saving {path.name} at step {step}: weights or optimizer are not finite")
         return
     T.MODELS.mkdir(parents=True, exist_ok=True)
     torch.save(dict(head=head.state_dict(), opt=opt.state_dict(), step=step, best=best, mu=mu, sd=sd, d_in=head.d_in,
-                    task="detr", hcfg=head.cfg, eval=ev or {},
-                    cfg=dict(steps=STEPS, lr=LR, accum=ACCUM, cap=CAP, voxel=R.VOXEL, encoder=T.ENCODER)), path)
+                    task="detr", hcfg=head.cfg, eval=ev or {}, validation_filter=(ev or {}).get("validation_filter"),
+                    rng=(dict(numpy=rng.bit_generator.state, torch=torch.get_rng_state(),
+                              cuda=torch.cuda.get_rng_state_all() if next(head.parameters()).is_cuda else None)
+                         if rng is not None else None),
+                    cfg=dict(steps=STEPS, lr=LR, accum=ACCUM, cap=CAP, voxel=R.VOXEL, crop=R.CROP,
+                             own=R.OWN, max_tokens=R.MAX_TOKENS, encoder=T.ENCODER,
+                             nms_r=R.NMS_R, min_p=R.MIN_P, grid=M.GRID, seed=T.SEED)), path)
+
+
+def training_crop(store, centres, rng):
+    if not len(centres):
+        raise RuntimeError("no eligible training centres")
+    for _ in range(20):
+        centre = centres[rng.integers(len(centres))] + rng.uniform(-0.5, 0.5, 2)
+        c = store.crop(*centre, R.CROP)
+        if c is not None and len(c["xyz"]) >= 200:
+            return c, centre
+    raise RuntimeError("failed to find a usable training crop after 20 attempts")
 
 
 def main():
@@ -137,30 +207,55 @@ def main():
     from scipy.spatial import cKDTree
     regions = np.load(OUT / "regions.npz")
     store = D.open_store(log)
-    centres = D.eligible_centres(regions, R.CROP, 0.45, 0)
+    # One metre of margin on each side protects the +/-0.5 m jitter.
+    centres = D.eligible_centres(regions, R.CROP + 2, 0.45, 0)
+    if not len(centres):
+        raise RuntimeError("no eligible training centres with split-safe jitter margin")
     rows = list(csv.DictReader(open(OUT / "label_bases.csv")))
     bxy = np.array([[float(r["x"]), float(r["y"])] for r in rows]).reshape(-1, 2)
     bkd = cKDTree(bxy)
+    # The size-attributed patch is TEST (sid=2), not VAL. Never select a
+    # checkpoint or probability cut using that held-out patch.
     gt, _, bbox = T.val_truth(regions)
+    gt = np.asarray(gt, dtype=np.float64).reshape(-1, 2)
+    truth = {"audit": {"version": 1, "split": "val", "filter": "all_survey_bases"}}
+    log("checkpoint selection: all VAL survey bases (no size attributes there); "
+        "v2_validate_detr separately scores diameter >=10 cm on TEST; height filter pending")
     log(f"{len(centres):,} training crop positions | {len(bxy):,} survey bases | val square {bbox} with {len(gt)} bases "
         f"| device {dev}")
+    if T.ENCODER not in ("sonata", "fake"):
+        raise ValueError("V2_ENCODER must be sonata (production) or fake (tests only)")
+    if T.ENCODER == "fake":
+        log("TEST-ONLY synthetic encoder: this is not a trained Sonata model")
     enc = M.load_sonata(dev) if T.ENCODER == "sonata" else M.FakeEncoder()
 
     ck = None
     for path in ((LAST, BEST) if T.RESUME else ()):
         if path.exists():
             c_ = torch.load(path, map_location=dev, weights_only=False)
+            validate_resume(c_, truth["audit"])
             if all(bool(torch.isfinite(v).all()) for v in c_["head"].values()):
                 ck = c_
                 break
             log(f"{path.name} (step {c_['step']}) has non-finite weights — not resuming from it")
-    mu, sd = (ck["mu"], ck["sd"]) if ck is not None else T.feature_stats(store, centres, rng)
-    probe = store.crop(*centres[len(centres) // 2], R.CROP)
+    probe = next((p for p in (store.crop(*centre, R.CROP) for centre in centres)
+                  if p is not None and len(p["xyz"]) > 0), None)
+    if probe is None:
+        raise RuntimeError("no usable training probe crop")
+    try:
+        mu, sd = (ck["mu"], ck["sd"]) if ck is not None else T.feature_stats(store, centres, rng)
+    except ValueError as exc:
+        raise RuntimeError("no usable crops for feature statistics") from exc
+    if not np.isfinite(mu).all() or not np.isfinite(sd).all() or np.any(np.asarray(sd) <= 0):
+        raise RuntimeError("feature statistics are not finite and positive")
     probe = {k: v[:20000] for k, v in probe.items()}
     d_in = T.Runner(enc, None, mu, sd, dev).inputs(probe).shape[1]
-    head = R.DetrHead(d_in, d=D_MODEL, n_query=QUERIES, layers=LAYERS).to(dev)
-    log(f"DETR head: {d_in} values per point -> {R.VOXEL:g} m voxels -> {LAYERS} decoder layers, {QUERIES} queries, "
-        f"d {D_MODEL} | {sum(p.numel() for p in head.parameters()):,} parameters")
+    if ck is not None and ck.get("d_in") != d_in:
+        raise ValueError("checkpoint encoder feature dimension mismatch; start fresh with V2_RESUME=0")
+    head = (R.DetrHead(ck["d_in"], **ck["hcfg"]) if ck is not None
+            else R.DetrHead(d_in, d=D_MODEL, n_query=QUERIES, layers=LAYERS)).to(dev)
+    log(f"DETR head: {d_in} values per point -> {R.VOXEL:g} m voxels -> {head.cfg['layers']} decoder layers, "
+        f"{head.cfg['n_query']} queries, d {head.cfg['d']} | {sum(p.numel() for p in head.parameters()):,} parameters")
     opt = torch.optim.AdamW(head.parameters(), lr=LR, weight_decay=WD)
     start, best = 0, -1.0
     if ck is not None:
@@ -177,21 +272,20 @@ def main():
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_at, last_epoch=start - 1)
     runner = DetrRunner(enc, head, mu, sd, dev)
 
-    run, t0, last, ev = {}, time.time(), time.time(), None
+    run, t0, last = {}, time.time(), time.time()
+    ev = dict(ck.get("eval", {})) if ck is not None else {"validation_filter": truth["audit"]}
+    if ck is not None:
+        restore_rng(ck, rng)
     skipped_crops = skipped_steps = 0
     for step in range(start + 1, STEPS + 1):
         opt.zero_grad(set_to_none=True)
         used, stats, l_sum = 0, [], 0.0
         for _ in range(ACCUM):
-            for _try in range(20):
-                cx, cy = centres[rng.integers(len(centres))] + rng.uniform(-0.5, 0.5, 2)
-                c = store.crop(cx, cy, R.CROP)
-                if c is not None and len(c["xyz"]) >= 200:
-                    break
+            c, centre = training_crop(store, centres, rng)
+            cx, cy = centre
             if len(c["xyz"]) > CAP:
                 sel = rng.choice(len(c["xyz"]), CAP, replace=False)
                 c = {k: v[sel] for k, v in c.items()}
-            centre = np.array([cx, cy])
             b = R.crop_bases(bkd, bxy, cx, cy)
             A = D.augment(c, rng, centre)
             b = (b - centre) @ A.T + centre if len(b) else b
@@ -203,13 +297,15 @@ def main():
             if loss is None or not bool(torch.isfinite(loss)):
                 skipped_crops += 1
                 if skipped_crops <= 50:
-                    log(f"  skipped crop at ({cx:.1f}, {cy:.1f}), step {step}: non-finite {'inputs' if o is None else 'loss'}")
+                    log(f"  skipped crop at ({cx:.1f}, {cy:.1f}), step {step}: non-finite {'inputs or head outputs' if o is None else 'loss'}")
                 continue
             (loss / ACCUM).backward()
-            l_sum += float(loss); used += 1; stats.append(st)
+            l_sum += float(loss.detach()); used += 1; stats.append(st)
         gn = torch.nn.utils.clip_grad_norm_(head.parameters(), CLIP) if used else torch.tensor(0.0)
         if used and bool(torch.isfinite(gn)):
             opt.step()
+            if not T.finite(head) or not finite_state(opt.state_dict()):
+                raise RuntimeError("optimizer produced non-finite weights or state; refusing to continue")
         elif used:
             skipped_steps += 1
             log(f"  step {step} not applied: gradient norm {float(gn)}")
@@ -232,13 +328,15 @@ def main():
                 f"{rate:.2f} s/step, eta {rate * (STEPS - step) / 3600:.1f} h{mem}"
                 + (f" | skipped {skipped_crops} crops, {skipped_steps} steps" if skipped_crops or skipped_steps else ""))
         if step % EVAL_EVERY == 0 or step == STEPS:
-            ev, det, sc, ign = evaluate(runner, store, gt, bbox, regions["split"], rng)
+            # Evaluation never advances the training sampler.
+            ev, det, sc, ign = evaluate(runner, store, gt, bbox, regions["split"], np.random.default_rng(T.SEED))
+            ev["validation_filter"] = truth["audit"]
             log(f"EVAL step {step}: AP@0.5 {ev['ap5']:.3f} | AP@0.3 {ev['ap3']:.3f} | max recall {ev['max_rec']:.3f} | "
                 f"best F1 on the val curve {ev['best_f1']:.3f} (P {ev['p_at']:.3f} R {ev['r_at']:.3f} at p >= {ev['cut']:.2f}) | "
                 f"{ev['det']} det (p >= {R.MIN_P:g}) / {ev['gt']} bases | {ev['seconds'] / 60:.1f} min")
             if ev["ap5"] > best:
                 best = ev["ap5"]
-                save(BEST, head, opt, step, best, mu, sd, ev)
+                save(BEST, head, opt, step, best, mu, sd, ev, rng=rng)
                 log(f"  new best -> {BEST}")
                 k = sc >= ev["cut"]
                 mm = V.match(det[k], sc[k], gt, 0.5, ignore=ign[k] if ign is not None else None)
@@ -250,9 +348,9 @@ def main():
                 T.figure(gt, det[k], mm["pair"], bbox, RESULTS / "59_stemnet_v2_val_detr.png",
                          title=f"StemNet v2 DETR head, val square at p >= {ev['cut']:.2f}: F1 {ev['best_f1']:.3f}, "
                                f"AP@0.5 {ev['ap5']:.3f}")
-            save(LAST, head, opt, step, best, mu, sd, ev)
+            save(LAST, head, opt, step, best, mu, sd, ev, rng=rng)
         elif step % 1000 == 0:
-            save(LAST, head, opt, step, best, mu, sd, ev)
+            save(LAST, head, opt, step, best, mu, sd, ev, rng=rng)
     log(f"done: {STEPS} steps in {(time.time() - t0) / 3600:.1f} h | best val AP@0.5 {best:.3f} -> {BEST}")
 
 

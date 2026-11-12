@@ -28,6 +28,8 @@
                                          # per-species results
     .\run_experiments.ps1 v2_validate_l1w # independent L1W validation of the
                                           # base-only model; downloads itself
+    .\run_experiments.ps1 v2_validate_detr # score a trained DETR checkpoint on
+                                           # val or test; no training
     .\run_experiments.ps1 gw_infer_head  # inference, but endpoints ranked by
                                      # the gw_head classifier (both reported)
 
@@ -251,6 +253,11 @@ function V2Kaggle { Log "StemNet v2 - push result files (default the val LAZ) to
     Invoke-Stage "v2_kaggle" }
 function V2TrainDetr { Log "StemNet v2 - train the DETR-style head (set prediction, Hungarian matching) on frozen Sonata + features (GPU)"
     Invoke-Stage "v2_train_detr" }
+# Read a trained DETR checkpoint back and score it once: no training, no cache
+# rebuild. Defaults live in validate_detr.py (detr_best.pth, attributed test split);
+# V2_DETR_CKPT / V2_DETR_SPLIT / V2_DETR_THRESHOLD in .env steer it.
+function V2ValidateDetr { Log "StemNet v2 - validate the DETR head: score a trained checkpoint on val or test, no training (GPU)"
+    Invoke-Stage "v2_validate_detr" }
 function V2Segment { Log "StemNet v2 - probe: frozen Sonata +/- features, k-means, no labels (GPU)"
     Invoke-Stage "v2_segment" }
 function ScBuild { Log "Building sonata_cluster image (on the sonata image)"
@@ -342,6 +349,7 @@ switch ($Target) {
     "v2_val_laz" { V2Build; V2ValLaz }
     "v2_kaggle" { V2Build; V2Kaggle }
     "v2_train_detr" { V2Build; V2Cache; V2TrainBuild; V2TrainTest; V2TrainDetr }
+    "v2_validate_detr" { V2TrainBuild; V2ValidateDetr }
     "v2_val_kaggle" { V2Build; V2ValLaz; V2Kaggle }
     "sc_test" { ScBuild; ScTest }
     "cluster" { ScBuild; ScTest; ScRun }
@@ -355,7 +363,7 @@ switch ($Target) {
     "gw_height" { GwBuild; GwHeight }
     "gw_head" { GwBuild; GwHead }
     default  {
-        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|v2_semantic|v2_train_tree|v2_validate|v2_validate_l1w|v2_infer|v2_eval|v2_inspect|v2_curves|v2_compare|v2_val_laz|v2_kaggle|v2_val_kaggle|v2_train_detr|cluster|cluster_tile|cluster_geom|sc_test]"
+        Write-Host "usage: .\run_experiments.ps1 [all|build|prep|sonata|exp1|exp2|exp3|exp4|basewalker|bw_prep|bw_train|bw_infer|bw_render|geowalker|gw_test|gpu_check|gw_field|gw_train|gw_infer|gw_infer_head|gw_infer_agg|gw_infer_patch|gw_baseline|gw_diag|gw_height|gw_head|stemnet|stem_build|stem_test|stem_train|stem_long|stem_full|stem_near|stem_infer|stem_patch|stem_eval|v2_test|v2_measure|v2_grid|v2_features|v2_bases|v2_splits|v2_labels|v2_prep|v2_export|v2_cache|v2_train_test|v2_train|v2_segment|v2_view|v2_semantic|v2_train_tree|v2_validate|v2_validate_l1w|v2_infer|v2_eval|v2_inspect|v2_curves|v2_compare|v2_val_laz|v2_kaggle|v2_val_kaggle|v2_train_detr|v2_validate_detr|cluster|cluster_tile|cluster_geom|sc_test]"
         exit 2
     }
 }

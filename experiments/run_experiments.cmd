@@ -11,6 +11,7 @@ REM
 REM   run_experiments.cmd geowalker
 REM   run_experiments.cmd gw_test | gw_field | gw_train | gw_infer
 REM   run_experiments.cmd v2_validate_l1w
+REM   run_experiments.cmd v2_validate_detr
 REM
 REM -NoProfile keeps a user's $PROFILE from injecting anything into the run.
 REM ---------------------------------------------------------------------------
